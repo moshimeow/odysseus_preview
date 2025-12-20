@@ -1,0 +1,25 @@
+[package]
+name = "odysseus-slam-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = "0.24"
+imageproc = "0.23"
+rerun = "0.27.2"
+
+[[example]]
+name = "detect_features"
+path = "examples/detect_features.rs"
+
+[[example]]
+name = "stereo_match"
+path = "examples/stereo_match.rs"
+
+[[example]]
+name = "track_sequence"
+path = "examples/track_sequence.rs"
+
+[[example]]
+name = "track_sequence_rerun"
+path = "examples/track_sequence_rerun.rs"
