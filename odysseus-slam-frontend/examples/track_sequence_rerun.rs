@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 
-use image::GrayImage;
+use image::{GrayImage, RgbImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let image_dir = Path::new(&args[1]);
 
-    // Initialize Rerun (same pattern as incremental_slam_demo.rs)
+    // Initialize Rerun
     let rec = rr::RecordingStreamBuilder::new("odysseus_slam_frontend").spawn()?;
 
     println!("Rerun viewer spawned successfully");
@@ -62,14 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Track feature history for visualization (id -> list of positions)
     let mut track_history: HashMap<usize, Vec<(f32, f32)>> = HashMap::new();
-
-    // Generate colors for track IDs
-    let colors: Vec<[u8; 3]> = (0..1000)
-        .map(|i| {
-            let hue = (i as f32 * 0.618033988749895) % 1.0; // Golden ratio for good distribution
-            hsv_to_rgb(hue, 0.8, 0.9)
-        })
-        .collect();
 
     // Process each frame
     let total_frames = frame_numbers.len();
@@ -120,40 +112,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Set timeline
         rec.set_time_sequence("frame", i as i64);
 
-        // Log left image
+        // Create side-by-side composite image
         let left_rgb = left_img.to_rgb8();
-        rec.log(
-            "world/left_image",
-            &rr::Image::from_rgb24(left_rgb.into_raw(), [width, height]),
-        )?;
-
-        // Log right image
         let right_rgb = right_img.to_rgb8();
+        let composite = create_side_by_side(&left_rgb, &right_rgb);
+
+        // Log the composite stereo image
         rec.log(
-            "world/right_image",
-            &rr::Image::from_rgb24(right_rgb.into_raw(), [width, height]),
+            "stereo_view",
+            &rr::Image::from_rgb24(composite.into_raw(), [width * 2, height]),
         )?;
 
-        // Log keypoints on left image
-        log_keypoints(&rec, "world/left_image/keypoints", &tracks, &colors)?;
+        // Log keypoints on left side of composite
+        log_left_keypoints(&rec, "stereo_view/left_keypoints", &tracks, &track_history)?;
 
-        // Log keypoints on right image (using right_kp positions)
-        log_right_keypoints(&rec, "world/right_image/keypoints", &tracks, &colors)?;
+        // Log keypoints on right side of composite
+        log_right_keypoints(&rec, "stereo_view/right_keypoints", &tracks, width)?;
 
-        // Log stereo matches as lines between left and right
-        log_stereo_matches(&rec, "world/stereo_matches", &tracks, &colors, width)?;
+        // Log stereo match lines (colored by inlier/outlier status)
+        log_stereo_matches(&rec, "stereo_view/matches", &tracks, width)?;
 
-        // Log orientation arrows
-        log_orientations(&rec, "world/left_image/orientations", &tracks)?;
+        // Log IDs as floating text above points
+        log_keypoint_labels(&rec, "stereo_view/labels", &tracks)?;
 
-        // Log track trajectories
-        log_track_trajectories(&rec, "world/left_image/tracks", &tracks, &track_history, &colors)?;
+        // Log track trajectories on left image
+        log_track_trajectories(&rec, "stereo_view/tracks", &tracks, &track_history)?;
 
-        // Log keypoint IDs as text annotations
-        log_keypoint_ids(&rec, "world/left_image/ids", &tracks)?;
-
-        // Log disparity information
-        log_disparity_info(&rec, "world/disparity", &tracks)?;
+        // Log disparity statistics
+        log_disparity_info(&rec, "stats/disparity", &tracks)?;
 
         // Print statistics
         let with_stereo = tracks.iter().filter(|t| t.age == 0).count();
@@ -186,21 +172,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Log keypoints as 2D points
-fn log_keypoints(
+/// Create a side-by-side composite of left and right images
+fn create_side_by_side(left: &RgbImage, right: &RgbImage) -> RgbImage {
+    let (width, height) = left.dimensions();
+    let mut composite = RgbImage::new(width * 2, height);
+
+    // Copy left image
+    for y in 0..height {
+        for x in 0..width {
+            composite.put_pixel(x, y, *left.get_pixel(x, y));
+        }
+    }
+
+    // Copy right image (offset by width)
+    for y in 0..height {
+        for x in 0..width {
+            composite.put_pixel(x + width, y, *right.get_pixel(x, y));
+        }
+    }
+
+    composite
+}
+
+/// Log keypoints on left side with color based on track age
+fn log_left_keypoints(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    colors: &[[u8; 3]],
+    history: &HashMap<usize, Vec<(f32, f32)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let positions: Vec<[f32; 2]> = tracks
         .iter()
         .map(|t| [t.stereo.left_kp.x, t.stereo.left_kp.y])
         .collect();
 
+    // Color based on track length (longer = greener)
     let point_colors: Vec<[u8; 3]> = tracks
         .iter()
-        .map(|t| colors[t.id % colors.len()])
+        .map(|t| {
+            let track_len = history.get(&t.id).map(|h| h.len()).unwrap_or(1);
+            track_age_color(track_len)
+        })
         .collect();
 
     // Size based on whether stereo match is valid
@@ -219,46 +231,40 @@ fn log_keypoints(
     Ok(())
 }
 
-/// Log keypoints on right image
+/// Log keypoints on right side of composite (offset by image width)
 fn log_right_keypoints(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    colors: &[[u8; 3]],
+    image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let valid_tracks: Vec<_> = tracks.iter().filter(|t| t.age == 0).collect();
 
     let positions: Vec<[f32; 2]> = valid_tracks
         .iter()
-        .map(|t| [t.stereo.right_kp.x, t.stereo.right_kp.y])
+        .map(|t| [t.stereo.right_kp.x + image_width as f32, t.stereo.right_kp.y])
         .collect();
 
-    let point_colors: Vec<[u8; 3]> = valid_tracks
-        .iter()
-        .map(|t| colors[t.id % colors.len()])
-        .collect();
-
+    // Green for valid stereo matches
     let num_points = positions.len();
     rec.log(
         path,
         &rr::Points2D::new(positions)
-            .with_colors(point_colors)
+            .with_colors(vec![[100u8, 255, 100]; num_points])
             .with_radii(vec![5.0; num_points]),
     )?;
 
     Ok(())
 }
 
-/// Log stereo matches as line segments
+/// Log stereo matches as lines between left and right images
+/// Color: green for good matches (inliers), red for questionable ones (outliers)
 fn log_stereo_matches(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    colors: &[[u8; 3]],
     image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a side-by-side view coordinate system
-    // Left image at x=0, right image offset by width
     let mut strips: Vec<Vec<[f32; 2]>> = Vec::new();
     let mut line_colors: Vec<[u8; 3]> = Vec::new();
 
@@ -269,7 +275,22 @@ fn log_stereo_matches(
             track.stereo.right_kp.y,
         ];
         strips.push(vec![left_pt, right_pt]);
-        line_colors.push(colors[track.id % colors.len()]);
+
+        // Determine if this is an inlier or outlier based on epipolar constraint
+        // For rectified stereo, left and right y-coordinates should be nearly equal
+        let vertical_diff = (track.stereo.left_kp.y - track.stereo.right_kp.y).abs();
+        let disparity = track.stereo.disparity;
+
+        // Inlier criteria:
+        // - Small vertical difference (good epipolar alignment)
+        // - Reasonable disparity range (not too small or too large)
+        let is_inlier = vertical_diff < 1.5 && disparity > 5.0 && disparity < 150.0;
+
+        if is_inlier {
+            line_colors.push([50, 255, 50]); // Green for inliers
+        } else {
+            line_colors.push([255, 100, 100]); // Red for outliers
+        }
     }
 
     if !strips.is_empty() {
@@ -277,53 +298,55 @@ fn log_stereo_matches(
             path,
             &rr::LineStrips2D::new(strips)
                 .with_colors(line_colors)
-                .with_radii(vec![1.0]),
+                .with_radii(vec![1.5]),
         )?;
     }
 
     Ok(())
 }
 
-/// Log keypoint orientations as arrows
-fn log_orientations(
+/// Log keypoint IDs as floating text above points
+fn log_keypoint_labels(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let arrow_len = 15.0;
+    // Only show labels for tracks with valid stereo matches
+    let valid_tracks: Vec<_> = tracks.iter().filter(|t| t.age == 0).collect();
 
-    let vectors: Vec<[f32; 2]> = tracks
+    if valid_tracks.is_empty() {
+        return Ok(());
+    }
+
+    // Position labels slightly above the keypoints
+    let label_offset_y = -12.0;
+
+    let positions: Vec<[f32; 2]> = valid_tracks
         .iter()
-        .map(|t| {
-            let angle = t.stereo.left_kp.angle;
-            [arrow_len * angle.cos(), arrow_len * angle.sin()]
-        })
+        .map(|t| [t.stereo.left_kp.x, t.stereo.left_kp.y + label_offset_y])
         .collect();
 
-    let origins: Vec<[f32; 2]> = tracks
+    let labels: Vec<String> = valid_tracks
         .iter()
-        .map(|t| [t.stereo.left_kp.x, t.stereo.left_kp.y])
+        .map(|t| format!("{}", t.id))
         .collect();
 
-    let num_arrows = tracks.len();
     rec.log(
         path,
-        &rr::Arrows2D::from_vectors(vectors)
-            .with_origins(origins)
-            .with_colors(vec![[255u8, 100, 100]; num_arrows])
-            .with_radii(vec![1.5; num_arrows]),
+        &rr::Points2D::new(positions)
+            .with_labels(labels)
+            .with_radii(vec![0.0; valid_tracks.len()]), // Invisible points, just show labels
     )?;
 
     Ok(())
 }
 
-/// Log track trajectories
+/// Log track trajectories on left image
 fn log_track_trajectories(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
     history: &HashMap<usize, Vec<(f32, f32)>>,
-    colors: &[[u8; 3]],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut strips: Vec<Vec<[f32; 2]>> = Vec::new();
     let mut line_colors: Vec<[u8; 3]> = Vec::new();
@@ -332,8 +355,9 @@ fn log_track_trajectories(
         if let Some(positions) = history.get(&track.id) {
             if positions.len() >= 2 {
                 let strip: Vec<[f32; 2]> = positions.iter().map(|&(x, y)| [x, y]).collect();
+                let track_len = positions.len();
                 strips.push(strip);
-                line_colors.push(colors[track.id % colors.len()]);
+                line_colors.push(track_age_color(track_len));
             }
         }
     }
@@ -350,39 +374,7 @@ fn log_track_trajectories(
     Ok(())
 }
 
-/// Log keypoint IDs as text
-fn log_keypoint_ids(
-    rec: &rr::RecordingStream,
-    path: &str,
-    tracks: &[TrackedFeature],
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Only show IDs for long-lived tracks to avoid clutter
-    let long_tracks: Vec<&TrackedFeature> = tracks
-        .iter()
-        .filter(|t| {
-            // Show ID if track has been alive for a while
-            t.age == 0 // Has valid stereo match
-        })
-        .collect();
-
-    if long_tracks.is_empty() {
-        return Ok(());
-    }
-
-    // Log as text annotations - one per keypoint
-    for track in long_tracks.iter().take(50) {
-        // Limit to avoid clutter
-        let label_path = format!("{}/id_{}", path, track.id);
-        rec.log(
-            label_path.as_str(),
-            &rr::TextDocument::new(format!("{}", track.id))
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Log disparity as a scalar timeline
+/// Log disparity statistics as scalar timelines
 fn log_disparity_info(
     rec: &rr::RecordingStream,
     path: &str,
@@ -419,24 +411,10 @@ fn log_disparity_info(
     Ok(())
 }
 
-/// Convert HSV to RGB
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
-    let c = v * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-
-    let (r, g, b) = match (h * 6.0) as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-
-    [
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    ]
+/// Color based on track age (short = red, long = green)
+fn track_age_color(length: usize) -> [u8; 3] {
+    let norm = (length as f32 / 20.0).min(1.0);
+    let r = ((1.0 - norm) * 255.0) as u8;
+    let g = (norm * 255.0) as u8;
+    [r, g, 100]
 }
