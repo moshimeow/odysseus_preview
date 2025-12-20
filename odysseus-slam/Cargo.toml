@@ -1,0 +1,19 @@
+[package]
+name = "odysseus-slam"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+odysseus-solver = { path = "../odysseus-solver", features = ["visualization"] }
+nalgebra = "0.32"
+rand = "0.8"
+rand_chacha = "0.3"
+rerun = "0.27.2"
+clap = { version = "4.5", features = ["derive"] }
+sprs = "0.11.4"
+
+
+[dev-dependencies]
+approx = "0.5"
+backtrace-on-stack-overflow = "0.1.0"
+image = "0.24"

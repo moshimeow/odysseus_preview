@@ -1,0 +1,31 @@
+[package]
+name = "arena-autodiff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arena-autodiff-macros = { path = "arena-autodiff-macros" }
+nalgebra = "0.32"
+num-traits = "0.2"
+rand = "0.8"
+paste = "1.0"
+glam = "0.29"
+# Visualization with rerun
+rerun = { version = "0.27.2", optional = true }
+
+[dev-dependencies]
+approx = "0.5"
+
+[features]
+default = []
+visualization = ["rerun"]
+
+[[example]]
+name = "kinematic_chain_rerun"
+path = "examples/kinematic_chain_rerun.rs"
+required-features = ["visualization"]
+
+[[example]]
+name = "pointcloud_alignment"
+path = "examples/pointcloud_alignment.rs"
+required-features = ["visualization"]

@@ -1,0 +1,14 @@
+goals:
+stronger parameter ordering
+
+implement marginalization
+
+frame graph refactor
+
+memory usage refactor
+
+more extensive frontend simulation
+
+learning modules for jets, levenberg marquardt, and beyond
+
+clean up optimization
