@@ -10,7 +10,7 @@ use odysseus_slam::{
     camera::StereoCamera,
     geometry::{Point3D, StereoObservation},
     math::SE3,
-    WorldState,
+    WorldState, SlamSystem,
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     simulation::{generate_stereo_observations, add_noise_to_stereo_observations},
     optimization::{run_bundle_adjustment, BundleAdjustmentConfig, MarginalizedPrior},
@@ -233,8 +233,8 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     let frame_observations_arc = Arc::new(frame_observations);
     
     // Create SLAM system (spawns GBA thread with shared observations)
-    //let mut slam_system = SlamSystem::new(stereo_camera.clone(), frame_observations_arc.clone());
-    //println!("🔧 SLAM System initialized (GBA thread spawned)\n");
+    let mut slam_system = SlamSystem::new(stereo_camera.clone(), frame_observations_arc.clone());
+    println!("🔧 SLAM System initialized (GBA thread spawned)\n");
 
     // Create WorldState (poses + map) and FrameGraph (state metadata)
     let mut world = WorldState::new();
@@ -260,7 +260,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  Initialized {} points from triangulation\n", world.num_points());
     println!("  Created initial keyframe from frame 0 (Fixed)\n");
-    //slam_system.send_to_gba(0, &world);
+    slam_system.send_to_gba(0, &world);
 
     // Visualize ground truth (static, shown in all timelines)
     let _ = visualize_ground_truth(&rec, &gt_points, &gt_poses)?;
@@ -285,7 +285,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         let frame_start = std::time::Instant::now();
         
         // Check for GBA results (non-blocking) and merge into world state
-        /*if let Some(gba_result) = slam_system.try_recv_from_gba() {
+        if let Some(gba_result) = slam_system.try_recv_from_gba() {
             // Replace frames GBA optimized (it always has fewer frames than us)
             let gba_world = &gba_result.world_state;
             let n_gba_frames = gba_world.frames.len();
@@ -311,7 +311,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             if frame_state.role != FrameRole::Keyframe {
                 frame_graph.set_role(gba_last_optimized_frame, FrameRole::Stored);
             }
-        }*/
+        }
 
 
         // Memory checkpoint every 10 frames
@@ -429,7 +429,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Send just this frame to GBA (incremental update)
-        //slam_system.send_to_gba(frame_idx, &world);
+        slam_system.send_to_gba(frame_idx, &world);
 
         // Get optimized pose for current frame
         let optimized_pose = world.frames[frame_idx].pose;
@@ -488,7 +488,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     println!("Average frame time: {:.2} ms", total_frame_time / total_frames as f64);
     
     // Let GBA finish any pending work
-    //drop(slam_system);
+    drop(slam_system);
     
     Ok(())
 }

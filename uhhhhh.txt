@@ -1,14 +1,24 @@
 goals:
+more extensive frontend simulation
+- markov detection + noise simulation
+- budget tracked frames
+- keypoint detection on rendered images
+- distortion simulation + distortion correction in backend
+
+better metrics generally
+
 stronger parameter ordering
 
-implement marginalization
+GBA marginalization
+
+mini GBA
+
+sparse prior
+
+optical flow first step pose estimation
 
 frame graph refactor
 
 memory usage refactor
 
-more extensive frontend simulation
-
 learning modules for jets, levenberg marquardt, and beyond
-
-clean up optimization
