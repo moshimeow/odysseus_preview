@@ -188,8 +188,8 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load GROUND TRUTH data from Blender export
     println!("🌍 Loading ground truth from greeble room...");
-    let gt_points_raw = load_point_cloud("./blender_stuff/greeble_room/room_mesh.bin")?;
-    let gt_poses = load_camera_poses("./blender_stuff/greeble_room/camera_poses.bin")?;
+    let gt_points_raw = load_point_cloud("./blender_stuff/greeble_room_simple_180/room_mesh_simple_repro_180.bin")?;
+    let gt_poses = load_camera_poses("./blender_stuff/greeble_room_simple_180/camera_poses_simple_repro_180.bin")?;
 
     // Convert points to Vec3 format
     let gt_points: Vec<_> = gt_points_raw.iter()
