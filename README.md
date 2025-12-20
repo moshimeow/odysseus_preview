@@ -15,14 +15,21 @@ In the corporate software world, I see this pattern a lot.
 
 My overarching point is that I really want you to use this, but I also really want you to understand that this project is the blood, sweat, tears and late nights of a bunch of random people who really want to make the world better. We published this for you, it's up to you to do the right thing for yourself and for the world, and push your management to let you contribute changes back to this project.
 
-So. Yes, we (will probably make) this project MIT. Yes, you are allowed to copy it and do whatever you want with it, and we fundamentally believe in your *right* to do so. However, we also fundamentally believe that sharing knowledge is everyone's *responsibility* to build a better world, and for this project we are putting a lot of good faith on the line hoping that everybody involved will take their responsibility here seriously.
+So. Yes, we (will probably make) this project MIT. Yes, you (will be) allowed to copy it and do whatever you want with it, and we fundamentally believe in your *right* to do so. However, we also fundamentally believe that sharing knowledge is everyone's *responsibility* to build a better world, and for this project we are putting a lot of good faith on the line hoping that everybody involved will take their responsibility here seriously.
 
 
+# What is this?
 
-# We should have a regular readme here
+This is an attempt at reimplementing important building blocks of C++ computer vision systems in Rust. The overall goals are something like
+* Something similar to Eigen3: reasonably powerful optimized math library.
+    * Bits of this already exist in eg. nalgebra and sprs, and we are just going to use those where possible
+    * One thing we are doing in this repo (for now?) is our own 3D math library. What we need is currently nebulous enough that it's worth having our own til it's better defined
+* Something similar to Ceres. This is mostly done in odysseus-solver.
+* Something similar to Basalt. We have a decent start at a SLAM backend in odysseus-slam.
+* Learning resources to show people how forwards autodiff, nonlinear optimization, marginalization, sparse matrix operations, and various other CV tools work.
 
 
-
+Some random other disclosures: We are heavily using Claude Code to write and test our code. Neither of us are like super locked in SLAM PhDs *or* rust developers and a lot of this represents our first attempts at these things. Please do not trust this code with anything important.
 
 
 # Contributing, Code of Conduct
