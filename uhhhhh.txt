@@ -22,3 +22,15 @@ frame graph refactor
 memory usage refactor
 
 learning modules for jets, levenberg marquardt, and beyond
+
+
+
+Documentation topics:
+* Why quaternion instead of rotation matrix for SO3?
+    * Double cover helps us when one of the angles is at pi, whereas rotation matrices make the derivatives go in the wrong direction!
+* Why do we parametrize as rotvec relative to a quaternion?
+    * Better numerical stability, taylor expansion when very close to zero (important for numerical stability -and- faster)
+    * Makes it way easier to think about confidence when we know it's expressed as a relatively low angle
+    * Makes it way easier to change the world (we just transform all the positions and quaternions)
+* Why, oh why, do we call it "tangent space?" Can we stop calling it that or is there a good reason?
+* Why inverse depth instead of vec3? (Why is vec3 so much simpler?)
