@@ -4,10 +4,16 @@ more extensive frontend simulation
 - budget tracked frames
 - keypoint detection on rendered images
 - distortion simulation + distortion correction in backend
+- logging
+- image pyramids
+- metrics
+- feature orientation
 
 better metrics generally
 
 IMU integration
+
+Considering adding more traits to Jets so that they're compatible with nalgebra's matrix/vector operations
 
 stronger parameter ordering
 
