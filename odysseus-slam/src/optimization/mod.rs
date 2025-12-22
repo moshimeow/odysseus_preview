@@ -235,14 +235,18 @@ pub fn run_bundle_adjustment(
     let n_residuals = n_obs_residuals + n_prior_residuals;
 
     // ========== 4. Pack parameters ==========
-    
+
     let mut initial_params = DVector::<f64>::zeros(n_params);
-    
+
     for (&frame_idx, &param_idx) in &pose_to_param_idx {
-        let tangent = world.frames[frame_idx].pose.log();
-        for i in 0..6 {
-            initial_params[param_idx + i] = tangent[i];
-        }
+        // pose.rotation is the delta (Vec3), pose.translation is world coords
+        let pose = &world.frames[frame_idx].pose;
+        initial_params[param_idx + 0] = pose.rotation.x;
+        initial_params[param_idx + 1] = pose.rotation.y;
+        initial_params[param_idx + 2] = pose.rotation.z;
+        initial_params[param_idx + 3] = pose.translation.x;
+        initial_params[param_idx + 4] = pose.translation.y;
+        initial_params[param_idx + 5] = pose.translation.z;
     }
     
     for &point_id in &optimized_point_ids {
@@ -490,17 +494,19 @@ pub fn run_bundle_adjustment(
     };
 
     // ========== 7. Unpack results ==========
-    
+
     for (&frame_idx, &param_idx) in &pose_to_param_idx {
-        let tangent = [
+        let rot_delta = Vec3::new(
             optimized_params[param_idx + 0],
             optimized_params[param_idx + 1],
             optimized_params[param_idx + 2],
+        );
+        let translation = Vec3::new(
             optimized_params[param_idx + 3],
             optimized_params[param_idx + 4],
             optimized_params[param_idx + 5],
-        ];
-        world.frames[frame_idx].pose = SE3::exp(tangent);
+        );
+        world.frames[frame_idx].pose.set_from_params(rot_delta, translation);
     }
     
     for &point_id in &optimized_point_ids {
@@ -573,9 +579,16 @@ fn jet_variables<const N: usize, const D: usize, P: std::ops::Index<usize, Outpu
     std::array::from_fn(|i| Jet::variable(params[param_offset + i], deriv_offset + i))
 }
 
-/// Compute stereo reprojection residual for XYZ parameterization
-pub fn stereo_reprojection_residual_xyz<T: Real>(
-    camera_pose_tangent: &[T; 6],
+/// Compute stereo reprojection residual with host-relative rotation parameterization
+///
+/// The pose is parameterized as:
+/// - rotation = q_host * exp(rotation_delta)
+/// - translation = direct world coordinates
+///
+/// This keeps rotation parameters small, avoiding the rotation vector singularity at 2π.
+pub fn stereo_reprojection_residual_host_relative<T: Real>(
+    rotation_host: &odysseus_solver::math3d::Quat<f64>,
+    pose_params: &[T; 6],  // [rotation_delta (3), translation (3)]
     world_point: &[T; 3],
     stereo_camera: &StereoCamera<T>,
     observed_left_u: T,
@@ -583,12 +596,32 @@ pub fn stereo_reprojection_residual_xyz<T: Real>(
     observed_right_u: T,
     observed_right_v: T,
 ) -> (T, T, T, T) {
+    // Build rotation: q_host * exp(delta)
+    let rot_delta = Vec3::new(pose_params[0], pose_params[1], pose_params[2]);
+    let q_delta = odysseus_solver::math3d::Quat::from_axis_angle(rot_delta);
+
+    // Compose with host (host is f64, delta is T)
+    // q_new = q_host * q_delta
+    let q_host_t = odysseus_solver::math3d::Quat::new(
+        T::from_literal(rotation_host.w),
+        T::from_literal(rotation_host.x),
+        T::from_literal(rotation_host.y),
+        T::from_literal(rotation_host.z),
+    );
+    let q_new = q_host_t * q_delta;
+
+    // Build world_T_camera pose
+    let translation = Vec3::new(pose_params[3], pose_params[4], pose_params[5]);
+    let world_t_camera = SE3::from_rotation_translation(
+        crate::math::SO3 { quat: q_new },
+        translation,
+    );
+
     // Transform world point to camera frame
-    let world_t_camera = SE3::exp(*camera_pose_tangent);
     let camera_t_world = world_t_camera.inverse();
     let point_world = Vec3::new(world_point[0], world_point[1], world_point[2]);
     let point_camera = camera_t_world.transform_point(point_world);
-    
+
     // Project to image
     let (pred_lu, pred_lv, pred_ru, pred_rv) = stereo_camera.project_stereo(point_camera);
     (
@@ -658,13 +691,20 @@ pub fn compute_cost(
             // Derivative layout: pose[0:6] if active, then point[0:3 or 6:9] if active
             let point_deriv_offset: usize = if POSE_ACTIVE { 6 } else { 0 };
 
-            // Observing pose
-            let camera_pose_tangent: [JetN; 6] = if POSE_ACTIVE {
+            // Get the host quaternion for this camera
+            let rotation_host = &world.frames[obs.camera_id].pose.rotation_host;
+
+            // Pose params: [rotation_delta, translation] - pose stores delta directly
+            let pose_params: [JetN; 6] = if POSE_ACTIVE {
                 let idx = pose_to_param_idx[&obs.camera_id];
                 jet_variables(params, idx, 0)
             } else {
-                let pose = world.frames[obs.camera_id].pose;
-                jet_constants(&pose.log())
+                // Fixed pose: read delta directly from pose (it's Vec3 now)
+                let pose = &world.frames[obs.camera_id].pose;
+                jet_constants(&[
+                    pose.rotation.x, pose.rotation.y, pose.rotation.z,
+                    pose.translation.x, pose.translation.y, pose.translation.z,
+                ])
             };
 
             // Point - variable if optimized, constant if fixed
@@ -687,9 +727,10 @@ pub fn compute_cost(
                 JetN::constant(stereo_camera.baseline),
             );
 
-            // Compute residuals
-            let (r1, r2, r3, r4) = stereo_reprojection_residual_xyz(
-                &camera_pose_tangent,
+            // Compute residuals using host-relative parameterization
+            let (r1, r2, r3, r4) = stereo_reprojection_residual_host_relative(
+                rotation_host,
+                &pose_params,
                 &world_point,
                 &camera_jet,
                 JetN::constant(obs.left_u),

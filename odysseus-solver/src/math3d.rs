@@ -211,6 +211,265 @@ impl<T: Real> std::ops::Mul for Mat3<T> {
 }
 
 // ============================================================================
+// Quat - Unit Quaternion (for 3D rotations)
+// ============================================================================
+
+/// Unit quaternion for 3D rotations, generic over any Real type
+///
+/// Uses scalar-first convention: q = w + xi + yj + zk
+/// For rotations, quaternions should be normalized (|q| = 1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quat<T> {
+    pub w: T,
+    pub x: T,
+    pub y: T,
+    pub z: T,
+}
+
+impl<T: Copy> Quat<T> {
+    pub const fn new(w: T, x: T, y: T, z: T) -> Self {
+        Self { w, x, y, z }
+    }
+}
+
+impl<T: Real> Quat<T> {
+    /// Create identity quaternion (no rotation)
+    pub fn identity() -> Self {
+        Self {
+            w: T::one(),
+            x: T::zero(),
+            y: T::zero(),
+            z: T::zero(),
+        }
+    }
+
+    /// Quaternion conjugate (inverse for unit quaternions)
+    pub fn conjugate(self) -> Self {
+        Self {
+            w: self.w,
+            x: T::zero() - self.x,
+            y: T::zero() - self.y,
+            z: T::zero() - self.z,
+        }
+    }
+
+    /// Squared norm of the quaternion
+    pub fn norm_squared(self) -> T {
+        self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    /// Norm (magnitude) of the quaternion
+    pub fn norm(self) -> T {
+        self.norm_squared().sqrt()
+    }
+
+    /// Normalize the quaternion to unit length
+    pub fn normalize(self) -> Self {
+        let n = self.norm();
+        Self {
+            w: self.w / n,
+            x: self.x / n,
+            y: self.y / n,
+            z: self.z / n,
+        }
+    }
+
+    /// Hamilton product (quaternion multiplication)
+    ///
+    /// q1 * q2 represents applying rotation q1 after q2
+    pub fn mul(self, other: Self) -> Self {
+        Self {
+            w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z,
+            x: self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
+            y: self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
+            z: self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
+        }
+    }
+
+    /// Rotate a 3D vector by this quaternion
+    ///
+    /// Uses the optimized formula: v' = v + 2w(q_xyz × v) + 2(q_xyz × (q_xyz × v))
+    /// which avoids full quaternion multiplication.
+    pub fn rotate_vec(self, v: Vec3<T>) -> Vec3<T> {
+        // t = 2 * (q_xyz × v)
+        let tx = T::from_literal(2.0) * (self.y * v.z - self.z * v.y);
+        let ty = T::from_literal(2.0) * (self.z * v.x - self.x * v.z);
+        let tz = T::from_literal(2.0) * (self.x * v.y - self.y * v.x);
+
+        // v' = v + w*t + (q_xyz × t)
+        Vec3 {
+            x: v.x + self.w * tx + (self.y * tz - self.z * ty),
+            y: v.y + self.w * ty + (self.z * tx - self.x * tz),
+            z: v.z + self.w * tz + (self.x * ty - self.y * tx),
+        }
+    }
+
+    /// Exponential map: axis-angle vector to unit quaternion
+    ///
+    /// Given rotation vector ω (axis × angle), computes the quaternion:
+    /// q = (cos(θ/2), sin(θ/2) * axis) where θ = ||ω||
+    pub fn from_axis_angle(rvec: Vec3<T>) -> Self {
+        let theta_sq = rvec.x * rvec.x + rvec.y * rvec.y + rvec.z * rvec.z;
+        let theta = theta_sq.sqrt();
+        let half_theta = theta * T::from_literal(0.5);
+
+        let sin_half = half_theta.sin();
+        let cos_half = half_theta.cos();
+
+        // Taylor series for small angles: sin(θ/2)/(θ) ≈ 0.5 - θ²/48
+        let taylor_sinc_half = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 48.0);
+
+        // Exact formula with safe division
+        let eps_sq = T::from_literal(1e-20);
+        let theta_safe = (theta_sq + eps_sq).sqrt();
+        let exact_sinc_half = sin_half / theta_safe;
+
+        // Blend between Taylor and exact
+        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
+        let sinc_half = taylor_sinc_half * (T::one() - blend) + exact_sinc_half * blend;
+
+        Self {
+            w: cos_half,
+            x: sinc_half * rvec.x,
+            y: sinc_half * rvec.y,
+            z: sinc_half * rvec.z,
+        }
+    }
+
+    /// Logarithm map: unit quaternion to axis-angle vector
+    ///
+    /// Returns the rotation vector ω = θ * axis where θ = 2 * acos(w)
+    pub fn to_axis_angle(self) -> Vec3<T> {
+        // θ = 2 * acos(w), but we need to handle the sign of w
+        // For unit quaternion, |xyz| = sin(θ/2)
+        let xyz_norm_sq = self.x * self.x + self.y * self.y + self.z * self.z;
+        let xyz_norm = xyz_norm_sq.sqrt();
+
+        // half_theta = asin(|xyz|) or acos(w)
+        // Using acos(w) for the angle
+        let half_theta = self.w.acos();
+        let theta = half_theta * T::from_literal(2.0);
+        let theta_sq = theta * theta;
+
+        // Taylor series for small angles: θ / sin(θ/2) ≈ 2 + θ²/12
+        let taylor_k = T::from_literal(2.0) + theta_sq * T::from_literal(1.0 / 12.0);
+
+        // Exact formula: θ / sin(θ/2) = θ / |xyz|
+        let eps = T::from_literal(1e-10);
+        let exact_k = theta / (xyz_norm + eps);
+
+        // Blend between Taylor and exact
+        let blend = xyz_norm_sq / (xyz_norm_sq + T::from_literal(0.0001));
+        let k = taylor_k * (T::one() - blend) + exact_k * blend;
+
+        Vec3 {
+            x: k * self.x,
+            y: k * self.y,
+            z: k * self.z,
+        }
+    }
+
+    /// Convert quaternion to rotation matrix
+    ///
+    /// Returns the equivalent 3x3 rotation matrix.
+    pub fn to_matrix(self) -> Mat3<T> {
+        let w = self.w;
+        let x = self.x;
+        let y = self.y;
+        let z = self.z;
+
+        let two = T::from_literal(2.0);
+
+        // Compute rotation matrix elements
+        // R = I + 2w*K + 2*K^2 where K is skew-symmetric from (x,y,z)
+        // Or equivalently:
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let wx = w * x;
+        let wy = w * y;
+        let wz = w * z;
+
+        Mat3::from_cols(
+            Vec3::new(
+                T::one() - two * (yy + zz),
+                two * (xy + wz),
+                two * (xz - wy),
+            ),
+            Vec3::new(
+                two * (xy - wz),
+                T::one() - two * (xx + zz),
+                two * (yz + wx),
+            ),
+            Vec3::new(
+                two * (xz + wy),
+                two * (yz - wx),
+                T::one() - two * (xx + yy),
+            ),
+        )
+    }
+}
+
+/// Convert rotation matrix to quaternion (for f64)
+///
+/// Uses Shepperd's method for numerical stability.
+/// Only implemented for f64 since it requires runtime branching.
+impl Quat<f64> {
+    pub fn from_matrix(m: Mat3<f64>) -> Self {
+        // Shepperd's method: find the largest diagonal element to avoid division by small numbers
+        let trace = m.m00() + m.m11() + m.m22();
+
+        let (w, x, y, z) = if trace > 0.0 {
+            // w is largest
+            let s = (1.0 + trace).sqrt() * 2.0; // s = 4*w
+            let w = s * 0.25;
+            let x = (m.m21() - m.m12()) / s;
+            let y = (m.m02() - m.m20()) / s;
+            let z = (m.m10() - m.m01()) / s;
+            (w, x, y, z)
+        } else if m.m00() > m.m11() && m.m00() > m.m22() {
+            // x is largest
+            let s = (1.0 + m.m00() - m.m11() - m.m22()).sqrt() * 2.0; // s = 4*x
+            let w = (m.m21() - m.m12()) / s;
+            let x = s * 0.25;
+            let y = (m.m01() + m.m10()) / s;
+            let z = (m.m02() + m.m20()) / s;
+            (w, x, y, z)
+        } else if m.m11() > m.m22() {
+            // y is largest
+            let s = (1.0 + m.m11() - m.m00() - m.m22()).sqrt() * 2.0; // s = 4*y
+            let w = (m.m02() - m.m20()) / s;
+            let x = (m.m01() + m.m10()) / s;
+            let y = s * 0.25;
+            let z = (m.m12() + m.m21()) / s;
+            (w, x, y, z)
+        } else {
+            // z is largest
+            let s = (1.0 + m.m22() - m.m00() - m.m11()).sqrt() * 2.0; // s = 4*z
+            let w = (m.m10() - m.m01()) / s;
+            let x = (m.m02() + m.m20()) / s;
+            let y = (m.m12() + m.m21()) / s;
+            let z = s * 0.25;
+            (w, x, y, z)
+        };
+
+        Self { w, x, y, z }
+    }
+}
+
+// Quaternion multiplication via Mul trait
+impl<T: Real> std::ops::Mul for Quat<T> {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        self.mul(other)
+    }
+}
+
+// ============================================================================
 // Rodrigues rotation formula
 // ============================================================================
 
@@ -419,5 +678,170 @@ mod tests {
         assert!((product.z_axis.z - 1.0).abs() < 1e-10);
         assert!((product.x_axis.y).abs() < 1e-10);
         assert!((product.y_axis.x).abs() < 1e-10);
+    }
+
+    // ========================================================================
+    // Quaternion tests
+    // ========================================================================
+
+    #[test]
+    fn test_quat_identity() {
+        let q = Quat::<f64>::identity();
+        assert_eq!(q.w, 1.0);
+        assert_eq!(q.x, 0.0);
+        assert_eq!(q.y, 0.0);
+        assert_eq!(q.z, 0.0);
+    }
+
+    #[test]
+    fn test_quat_identity_rotation() {
+        // Identity quaternion should not change vector
+        let q = Quat::<f64>::identity();
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        let result = q.rotate_vec(v);
+
+        assert!((result.x - 1.0).abs() < 1e-10);
+        assert!((result.y - 2.0).abs() < 1e-10);
+        assert!((result.z - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quat_90deg_z_rotation() {
+        // 90 degree rotation around Z axis
+        let rvec = Vec3::new(0.0, 0.0, std::f64::consts::PI / 2.0);
+        let q = Quat::from_axis_angle(rvec);
+
+        // Rotate X axis, should get Y axis
+        let x_axis = Vec3::new(1.0, 0.0, 0.0);
+        let rotated = q.rotate_vec(x_axis);
+
+        assert!((rotated.x - 0.0).abs() < 1e-5, "Expected x=0, got {}", rotated.x);
+        assert!((rotated.y - 1.0).abs() < 1e-5, "Expected y=1, got {}", rotated.y);
+        assert!((rotated.z - 0.0).abs() < 1e-5, "Expected z=0, got {}", rotated.z);
+    }
+
+    #[test]
+    fn test_quat_composition() {
+        // Two 90-degree rotations around Z should give 180 degrees
+        let rvec = Vec3::new(0.0, 0.0, std::f64::consts::PI / 2.0);
+        let q1 = Quat::from_axis_angle(rvec);
+        let q2 = Quat::from_axis_angle(rvec);
+        let combined = q1 * q2;
+
+        // Apply to X axis, should get -X
+        let x_axis = Vec3::new(1.0, 0.0, 0.0);
+        let rotated = combined.rotate_vec(x_axis);
+
+        assert!((rotated.x - (-1.0)).abs() < 1e-5, "Expected x=-1, got {}", rotated.x);
+        assert!((rotated.y - 0.0).abs() < 1e-5, "Expected y=0, got {}", rotated.y);
+        assert!((rotated.z - 0.0).abs() < 1e-5, "Expected z=0, got {}", rotated.z);
+    }
+
+    #[test]
+    fn test_quat_inverse() {
+        let rvec = Vec3::new(0.3, 0.4, 0.5);
+        let q = Quat::from_axis_angle(rvec);
+        let q_inv = q.conjugate();
+        let identity = q * q_inv;
+
+        // Should be close to identity
+        assert!((identity.w - 1.0).abs() < 1e-5);
+        assert!(identity.x.abs() < 1e-5);
+        assert!(identity.y.abs() < 1e-5);
+        assert!(identity.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_quat_exp_log_roundtrip() {
+        let test_cases = vec![
+            Vec3::new(0.1, 0.2, 0.3),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.5, 0.5, 0.5),
+        ];
+
+        for rvec in test_cases {
+            let q = Quat::from_axis_angle(rvec);
+            let rvec_recovered = q.to_axis_angle();
+            let q_recovered = Quat::from_axis_angle(rvec_recovered);
+
+            // Test by rotating a point
+            let p = Vec3::new(1.0, 2.0, 3.0);
+            let r1 = q.rotate_vec(p);
+            let r2 = q_recovered.rotate_vec(p);
+
+            assert!((r1.x - r2.x).abs() < 1e-4, "x mismatch: {} vs {}", r1.x, r2.x);
+            assert!((r1.y - r2.y).abs() < 1e-4, "y mismatch: {} vs {}", r1.y, r2.y);
+            assert!((r1.z - r2.z).abs() < 1e-4, "z mismatch: {} vs {}", r1.z, r2.z);
+        }
+    }
+
+    #[test]
+    fn test_quat_log_exp_roundtrip() {
+        // For small angles, log(exp(ω)) should equal ω
+        let test_cases = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.1, 0.2, 0.3),
+            Vec3::new(0.01, 0.02, 0.03),
+        ];
+
+        for rvec in test_cases {
+            let q = Quat::from_axis_angle(rvec);
+            let rvec_recovered = q.to_axis_angle();
+
+            assert!((rvec_recovered.x - rvec.x).abs() < 1e-6);
+            assert!((rvec_recovered.y - rvec.y).abs() < 1e-6);
+            assert!((rvec_recovered.z - rvec.z).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_quat_with_autodiff() {
+        type Jet3 = Jet<f64, 3>;
+
+        let rx = Jet3::variable(0.2, 0);
+        let ry = Jet3::variable(0.3, 1);
+        let rz = Jet3::variable(0.1, 2);
+
+        let rvec = Vec3::new(rx, ry, rz);
+        let q = Quat::from_axis_angle(rvec);
+
+        // Rotate a point
+        let p = Vec3::new(
+            Jet3::constant(1.0),
+            Jet3::constant(2.0),
+            Jet3::constant(3.0),
+        );
+        let rotated = q.rotate_vec(p);
+
+        // Check that we have non-zero derivatives
+        assert!(rotated.x.derivs.iter().any(|&d| d.abs() > 1e-10));
+        assert!(rotated.y.derivs.iter().any(|&d| d.abs() > 1e-10));
+        assert!(rotated.z.derivs.iter().any(|&d| d.abs() > 1e-10));
+    }
+
+    #[test]
+    fn test_quat_matches_rodrigues() {
+        // Verify quaternion rotation gives same result as rotation matrix
+        let test_cases = vec![
+            Vec3::new(0.1, 0.2, 0.3),
+            Vec3::new(0.0, 0.0, std::f64::consts::PI / 2.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+        ];
+
+        for rvec in test_cases {
+            let q = Quat::from_axis_angle(rvec);
+            let mat = rodrigues_to_matrix(rvec);
+
+            let p = Vec3::new(1.0, 2.0, 3.0);
+            let r_quat = q.rotate_vec(p);
+            let r_mat = mat.mul_vec(p);
+
+            assert!((r_quat.x - r_mat.x).abs() < 1e-4, "x mismatch for rvec {:?}: {} vs {}", rvec, r_quat.x, r_mat.x);
+            assert!((r_quat.y - r_mat.y).abs() < 1e-4, "y mismatch for rvec {:?}: {} vs {}", rvec, r_quat.y, r_mat.y);
+            assert!((r_quat.z - r_mat.z).abs() < 1e-4, "z mismatch for rvec {:?}: {} vs {}", rvec, r_quat.z, r_mat.z);
+        }
     }
 }

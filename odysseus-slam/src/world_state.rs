@@ -46,33 +46,104 @@ impl PointInfo {
     }
 }
 
+/// Camera pose with host-relative rotation parameterization
+///
+/// Stores rotation as a small delta from a host quaternion to keep parameters
+/// small during optimization, avoiding the rotation vector singularity at 2π.
+#[derive(Clone, Copy, Debug)]
+pub struct Pose {
+    /// Rotation delta as axis-angle (should be small)
+    pub rotation: Vec3<f64>,
+    /// Translation in world coordinates
+    pub translation: Vec3<f64>,
+    /// Host quaternion - world rotation is `host * exp(rotation)`
+    pub rotation_host: odysseus_solver::math3d::Quat<f64>,
+}
+
+impl Pose {
+    /// Create a new pose from a world-space SE3
+    ///
+    /// Sets rotation_host to the world rotation and rotation delta to zero.
+    pub fn from_se3(world_pose: SE3<f64>) -> Self {
+        Self {
+            rotation: Vec3::new(0.0, 0.0, 0.0),
+            translation: world_pose.translation,
+            rotation_host: world_pose.rotation.quat,
+        }
+    }
+
+    /// Create an identity pose at the origin
+    pub fn identity() -> Self {
+        Self {
+            rotation: Vec3::new(0.0, 0.0, 0.0),
+            translation: Vec3::new(0.0, 0.0, 0.0),
+            rotation_host: odysseus_solver::math3d::Quat::identity(),
+        }
+    }
+
+    /// Get the world rotation as a quaternion
+    pub fn world_rotation(&self) -> odysseus_solver::math3d::Quat<f64> {
+        let q_delta = odysseus_solver::math3d::Quat::from_axis_angle(self.rotation);
+        (self.rotation_host * q_delta).normalize()
+    }
+
+    /// Get the full world-space pose as SE3
+    pub fn to_se3(&self) -> SE3<f64> {
+        SE3::from_rotation_translation(
+            crate::math::SO3 { quat: self.world_rotation() },
+            self.translation,
+        )
+    }
+
+    /// Set from optimization parameters (rotation delta + world translation)
+    pub fn set_from_params(&mut self, rotation_delta: Vec3<f64>, translation: Vec3<f64>) {
+        self.rotation = rotation_delta;
+        self.translation = translation;
+    }
+
+    /// Transform a point from camera coordinates to world coordinates
+    pub fn camera_to_world(&self, camera_point: Vec3<f64>) -> Vec3<f64> {
+        self.to_se3().transform_point(camera_point)
+    }
+
+    /// Transform a point from world coordinates to camera coordinates
+    pub fn world_to_camera(&self, world_point: Vec3<f64>) -> Vec3<f64> {
+        self.to_se3().inverse().transform_point(world_point)
+    }
+}
+
 /// A single frame of the world state
 #[derive(Clone)]
 pub struct WorldFrame {
-    /// The pose of the frame
-    pub pose: SE3<f64>,
+    /// Camera pose (stores rotation delta, translation, and host)
+    pub pose: Pose,
     /// The points stored in world coordinates
     /// If this has points, it means this frame is a keyframe
     pub points: HashMap<usize, PointInfo>,
 }
 
 impl WorldFrame {
-    /// Create a new world frame
-    pub fn new(pose: SE3<f64>, points: Option<HashMap<usize, PointInfo>>) -> Self {
+    /// Create a new world frame from a world-space pose
+    pub fn new(world_pose: SE3<f64>, points: Option<HashMap<usize, PointInfo>>) -> Self {
         Self {
-            pose,
+            pose: Pose::from_se3(world_pose),
             points: points.unwrap_or_default(),
         }
     }
 
+    /// Get the pose in world coordinates as SE3
+    pub fn world_pose(&self) -> SE3<f64> {
+        self.pose.to_se3()
+    }
+
     /// Convert a point from this frame's camera coordinates to world coordinates
     pub fn camera_to_world(&self, camera_point: Vec3<f64>) -> Vec3<f64> {
-        self.pose.transform_point(camera_point)
+        self.pose.camera_to_world(camera_point)
     }
 
     /// Convert a point from world coordinates to this frame's camera coordinates
     pub fn world_to_camera(&self, world_point: Vec3<f64>) -> Vec3<f64> {
-        self.pose.inverse().transform_point(world_point)
+        self.pose.world_to_camera(world_point)
     }
 }
 
@@ -133,14 +204,9 @@ impl WorldState {
         self.frames.len()
     }
 
-    /// Get a pose by frame index
-    pub fn get_pose(&self, frame_idx: usize) -> Option<&SE3<f64>> {
-        self.frames.get(frame_idx).map(|f| &f.pose)
-    }
-
-    /// Get a mutable pose by frame index
-    pub fn get_pose_mut(&mut self, frame_idx: usize) -> Option<&mut SE3<f64>> {
-        self.frames.get_mut(frame_idx).map(|f| &mut f.pose)
+    /// Get the world pose for a frame
+    pub fn get_pose(&self, frame_idx: usize) -> Option<SE3<f64>> {
+        self.frames.get(frame_idx).map(|f| f.world_pose())
     }
 
     // ========== Point methods (inverse depth) ==========

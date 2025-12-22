@@ -1,34 +1,34 @@
 //! SO(3) - Special Orthogonal Group (3D Rotations)
 //!
-//! This module provides a type-safe wrapper around rotation matrices with
+//! This module provides a type-safe wrapper around unit quaternions with
 //! Lie algebra operations (exp, log, composition).
 
-use odysseus_solver::math3d::{Mat3, Vec3, rodrigues_to_matrix};
+use odysseus_solver::math3d::{Mat3, Quat, Vec3};
 use odysseus_solver::Real;
 use std::ops::Mul;
 
 /// SO(3) rotation representation
 ///
-/// Internally stored as a 3x3 rotation matrix.
+/// Internally stored as a unit quaternion.
 /// Use `exp()` to convert from axis-angle (tangent space) to SO3.
 /// Use `log()` to convert from SO3 to axis-angle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SO3<T> {
-    /// Rotation matrix (column-major)
-    pub matrix: Mat3<T>,
+    /// Unit quaternion representing the rotation
+    pub quat: Quat<T>,
 }
 
 impl<T: Real> SO3<T> {
     /// Create identity rotation
     pub fn identity() -> Self {
         Self {
-            matrix: Mat3::identity(),
+            quat: Quat::identity(),
         }
     }
 
     /// Exponential map: axis-angle -> SO3
     ///
-    /// Converts a rotation vector (axis-angle representation) to a rotation matrix.
+    /// Converts a rotation vector (axis-angle representation) to a rotation.
     /// The direction of the vector is the rotation axis, the magnitude is the angle.
     ///
     /// # Arguments
@@ -38,48 +38,19 @@ impl<T: Real> SO3<T> {
     /// * Rotation in SO(3)
     pub fn exp(rvec: Vec3<T>) -> Self {
         Self {
-            matrix: rodrigues_to_matrix(rvec),
+            quat: Quat::from_axis_angle(rvec),
         }
     }
 
     /// Logarithm map: SO3 -> axis-angle
     ///
-    /// Converts a rotation matrix to axis-angle representation.
+    /// Converts a rotation to axis-angle representation.
     /// This is the inverse of `exp()`.
     ///
     /// # Returns
     /// * Rotation vector in tangent space R^3
     pub fn log(&self) -> Vec3<T> {
-        // Extract rotation angle from trace
-        // trace(R) = 1 + 2*cos(theta)
-        // theta = arccos((trace - 1) / 2)
-        let trace = self.matrix.x_axis.x + self.matrix.y_axis.y + self.matrix.z_axis.z;
-        let cos_theta = (trace - T::one()) * T::from_literal(0.5);
-        let theta = cos_theta.acos();
-        let theta_sq = theta * theta;
-
-        // For small angles, use Taylor series to avoid division by sin(theta)
-        // For large angles, use exact formula
-        let eps_sq = T::from_literal(1e-20);
-        let theta_safe = (theta_sq + eps_sq).sqrt();
-        let sin_theta = theta.sin();
-
-        // Taylor series: k ~= 0.5 + theta^2/12
-        let taylor_k = T::from_literal(0.5) + theta_sq * T::from_literal(1.0 / 12.0);
-
-        // Exact: k = theta / (2 * sin(theta))
-        let exact_k = theta_safe / (T::from_literal(2.0) * sin_theta + eps_sq);
-
-        // Blend between Taylor and exact
-        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
-        let k = taylor_k * (T::one() - blend) + exact_k * blend;
-
-        // Extract axis from skew-symmetric part: omega = k * (R - R^T)
-        Vec3::new(
-            k * (self.matrix.y_axis.z - self.matrix.z_axis.y),
-            k * (self.matrix.z_axis.x - self.matrix.x_axis.z),
-            k * (self.matrix.x_axis.y - self.matrix.y_axis.x),
-        )
+        self.quat.to_axis_angle()
     }
 
     /// Rotate a 3D vector
@@ -90,30 +61,32 @@ impl<T: Real> SO3<T> {
     /// # Returns
     /// * Rotated vector
     pub fn rotate(&self, v: Vec3<T>) -> Vec3<T> {
-        self.matrix.mul_vec(v)
+        self.quat.rotate_vec(v)
     }
 
-    /// Get the inverse rotation (transpose for rotation matrices)
+    /// Get the inverse rotation (conjugate for unit quaternions)
     pub fn inverse(&self) -> Self {
-        // For rotation matrices, inverse = transpose
         Self {
-            matrix: Mat3::from_cols(
-                Vec3::new(
-                    self.matrix.x_axis.x,
-                    self.matrix.y_axis.x,
-                    self.matrix.z_axis.x,
-                ),
-                Vec3::new(
-                    self.matrix.x_axis.y,
-                    self.matrix.y_axis.y,
-                    self.matrix.z_axis.y,
-                ),
-                Vec3::new(
-                    self.matrix.x_axis.z,
-                    self.matrix.y_axis.z,
-                    self.matrix.z_axis.z,
-                ),
-            ),
+            quat: self.quat.conjugate(),
+        }
+    }
+
+    /// Convert to rotation matrix
+    ///
+    /// Returns the equivalent 3x3 rotation matrix.
+    pub fn to_matrix(&self) -> Mat3<T> {
+        self.quat.to_matrix()
+    }
+}
+
+impl SO3<f64> {
+    /// Create SO3 from a rotation matrix
+    ///
+    /// Converts a 3x3 rotation matrix to SO3 (quaternion representation).
+    /// Only implemented for f64 since it requires runtime branching.
+    pub fn from_matrix(matrix: Mat3<f64>) -> Self {
+        Self {
+            quat: Quat::from_matrix(matrix),
         }
     }
 }
@@ -123,46 +96,8 @@ impl<T: Real> Mul for SO3<T> {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self {
-        // Matrix multiplication
-        let m1 = self.matrix;
-        let m2 = rhs.matrix;
-
         Self {
-            matrix: Mat3::from_cols(
-                Vec3::new(
-                    m1.x_axis.x * m2.x_axis.x
-                        + m1.y_axis.x * m2.x_axis.y
-                        + m1.z_axis.x * m2.x_axis.z,
-                    m1.x_axis.y * m2.x_axis.x
-                        + m1.y_axis.y * m2.x_axis.y
-                        + m1.z_axis.y * m2.x_axis.z,
-                    m1.x_axis.z * m2.x_axis.x
-                        + m1.y_axis.z * m2.x_axis.y
-                        + m1.z_axis.z * m2.x_axis.z,
-                ),
-                Vec3::new(
-                    m1.x_axis.x * m2.y_axis.x
-                        + m1.y_axis.x * m2.y_axis.y
-                        + m1.z_axis.x * m2.y_axis.z,
-                    m1.x_axis.y * m2.y_axis.x
-                        + m1.y_axis.y * m2.y_axis.y
-                        + m1.z_axis.y * m2.y_axis.z,
-                    m1.x_axis.z * m2.y_axis.x
-                        + m1.y_axis.z * m2.y_axis.y
-                        + m1.z_axis.z * m2.y_axis.z,
-                ),
-                Vec3::new(
-                    m1.x_axis.x * m2.z_axis.x
-                        + m1.y_axis.x * m2.z_axis.y
-                        + m1.z_axis.x * m2.z_axis.z,
-                    m1.x_axis.y * m2.z_axis.x
-                        + m1.y_axis.y * m2.z_axis.y
-                        + m1.z_axis.y * m2.z_axis.z,
-                    m1.x_axis.z * m2.z_axis.x
-                        + m1.y_axis.z * m2.z_axis.y
-                        + m1.z_axis.z * m2.z_axis.z,
-                ),
-            ),
+            quat: self.quat * rhs.quat,
         }
     }
 }
@@ -190,9 +125,10 @@ mod tests {
         let rot = SO3::exp(rvec);
 
         let id = SO3::<f64>::identity();
-        assert_abs_diff_eq!(rot.matrix.x_axis.x, id.matrix.x_axis.x, epsilon = 1e-10);
-        assert_abs_diff_eq!(rot.matrix.y_axis.y, id.matrix.y_axis.y, epsilon = 1e-10);
-        assert_abs_diff_eq!(rot.matrix.z_axis.z, id.matrix.z_axis.z, epsilon = 1e-10);
+        assert_abs_diff_eq!(rot.quat.w, id.quat.w, epsilon = 1e-10);
+        assert_abs_diff_eq!(rot.quat.x, id.quat.x, epsilon = 1e-10);
+        assert_abs_diff_eq!(rot.quat.y, id.quat.y, epsilon = 1e-10);
+        assert_abs_diff_eq!(rot.quat.z, id.quat.z, epsilon = 1e-10);
     }
 
     #[test]
@@ -212,23 +148,15 @@ mod tests {
             let rvec_recovered = rot.log();
             let rot_recovered = SO3::exp(rvec_recovered);
 
-            // Check that matrices match
-            // 1e-2 seems pretty high? Consider consulting
-            assert_abs_diff_eq!(
-                rot_recovered.matrix.x_axis.x,
-                rot.matrix.x_axis.x,
-                epsilon = 1e-2
-            );
-            assert_abs_diff_eq!(
-                rot_recovered.matrix.y_axis.y,
-                rot.matrix.y_axis.y,
-                epsilon = 1e-2
-            );
-            assert_abs_diff_eq!(
-                rot_recovered.matrix.z_axis.z,
-                rot.matrix.z_axis.z,
-                epsilon = 1e-2
-            );
+            // Test by rotating a point - the rotations should match
+            let p = Vec3::new(1.0, 2.0, 3.0);
+            let r1 = rot.rotate(p);
+            let r2 = rot_recovered.rotate(p);
+
+            // Use relative epsilon for large values
+            assert_abs_diff_eq!(r1.x, r2.x, epsilon = 1e-4);
+            assert_abs_diff_eq!(r1.y, r2.y, epsilon = 1e-4);
+            assert_abs_diff_eq!(r1.z, r2.z, epsilon = 1e-4);
         }
     }
 

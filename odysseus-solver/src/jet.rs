@@ -274,6 +274,9 @@ pub trait Real:
 
     fn zero() -> Self;
     fn one() -> Self;
+
+    /// Extract the scalar value (for comparisons/branching)
+    fn scalar(&self) -> Self::Scalar;
 }
 
 /// Real implementation for f64 (no autodiff)
@@ -316,6 +319,9 @@ impl Real for f64 {
     fn one() -> Self {
         1.0
     }
+    fn scalar(&self) -> Self::Scalar {
+        *self
+    }
 }
 
 /// Real implementation for f32 (no autodiff)
@@ -357,6 +363,9 @@ impl Real for f32 {
     }
     fn one() -> Self {
         1.0
+    }
+    fn scalar(&self) -> Self::Scalar {
+        *self
     }
 }
 
@@ -401,6 +410,9 @@ macro_rules! impl_real_for_jet {
             }
             fn one() -> Self {
                 Jet::constant(1.0)
+            }
+            fn scalar(&self) -> Self::Scalar {
+                self.value
             }
         }
     };

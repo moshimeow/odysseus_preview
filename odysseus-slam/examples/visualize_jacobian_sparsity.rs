@@ -256,7 +256,7 @@ fn visualize_stereo_camera(
     stereo_camera: &StereoCamera<f64>,
     color: [u8; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let camera_rot = pose.rotation.matrix;
+    let camera_rot = pose.rotation.to_matrix();
     let camera_rot_for_rerun = camera_rot.inverse();
     let rot_matrix = [
         [camera_rot_for_rerun.m00() as f32, camera_rot_for_rerun.m01() as f32, camera_rot_for_rerun.m02() as f32],

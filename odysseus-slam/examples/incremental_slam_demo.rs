@@ -109,7 +109,7 @@ fn load_camera_poses(path: &str) -> Result<Vec<SE3<f64>>, Box<dyn std::error::Er
         );
 
         let rotation_matrix = odysseus_solver::math3d::Mat3::from_cols(x_axis, y_axis, z_axis);
-        let rotation = odysseus_slam::math::SO3 { matrix: rotation_matrix };
+        let rotation = odysseus_slam::math::SO3::from_matrix(rotation_matrix);
 
         let translation = odysseus_solver::math3d::Vec3::new(
             matrix[0][3] as f64,
@@ -188,8 +188,8 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load GROUND TRUTH data from Blender export
     println!("🌍 Loading ground truth from greeble room...");
-    let gt_points_raw = load_point_cloud("./blender_stuff/greeble_room_simple_180/room_mesh_simple_repro_180.bin")?;
-    let gt_poses = load_camera_poses("./blender_stuff/greeble_room_simple_180/camera_poses_simple_repro_180.bin")?;
+    let gt_points_raw = load_point_cloud("./blender_stuff/greeble_room/room_mesh.bin")?;
+    let gt_poses = load_camera_poses("./blender_stuff/greeble_room/camera_poses.bin")?;
 
     // Convert points to Vec3 format
     let gt_points: Vec<_> = gt_points_raw.iter()
@@ -321,7 +321,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Get last estimated pose for initial guess
-        let last_pose = *world.get_pose(frame_idx - 1).unwrap();
+        let last_pose = world.get_pose(frame_idx - 1).unwrap();
 
         // Get observations for current frame
         let current_frame_obs = &frame_observations_arc[frame_idx];
@@ -432,14 +432,15 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         slam_system.send_to_gba(frame_idx, &world);
 
         // Get optimized pose for current frame
-        let optimized_pose = world.frames[frame_idx].pose;
+        let optimized_pose = world.frames[frame_idx].world_pose();
 
         let pos_error = (optimized_pose.translation - gt_poses[frame_idx].translation).norm();
 
-        // Compute rotation error
-        let r_error = gt_poses[frame_idx].rotation.matrix.transpose() * optimized_pose.rotation.matrix;
-        let trace = r_error.m00() + r_error.m11() + r_error.m22();
-        let angle_rad = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
+        // Compute rotation error using quaternions
+        // The rotation error quaternion q_err = q1^(-1) * q2
+        // For unit quaternions, angle = 2 * acos(|w|) where w is the scalar part
+        let q_err = gt_poses[frame_idx].rotation.inverse().quat * optimized_pose.rotation.quat;
+        let angle_rad = 2.0 * q_err.w.abs().acos();
         let angle_deg = angle_rad.to_degrees();
 
         // Warn if error exceeds thresholds
@@ -612,7 +613,7 @@ fn visualize_estimate(
             visualize_stereo_camera(
                 rec,
                 &format!("{}/cam_{:03}", path_prefix, idx),
-                &world.frames[idx].pose,
+                &world.frames[idx].world_pose(),
                 stereo_camera,
                 color,
             )?;
@@ -657,7 +658,7 @@ fn visualize_estimate(
     // Estimated trajectory (blue line) - collect poses
     let trajectory: Vec<[f32; 3]> = world.frames.iter()
         .map(|frame| {
-            let t = &frame.pose.translation;
+            let t = frame.world_pose().translation;
             [t.x as f32, t.y as f32, t.z as f32]
         })
         .collect();
@@ -704,7 +705,7 @@ fn visualize_gba_update(
     // GBA trajectory (orange line)
     let trajectory: Vec<[f32; 3]> = gba_world.frames.iter()
         .map(|frame| {
-            let t = &frame.pose.translation;
+            let t = frame.world_pose().translation;
             [t.x as f32, t.y as f32, t.z as f32]
         })
         .collect();
@@ -766,7 +767,7 @@ fn visualize_gba_update(
             visualize_stereo_camera(
                 rec,
                 &format!("{}/cam_{:03}", path_prefix, idx),
-                &frame.pose,
+                &frame.world_pose(),
                 stereo_camera,
                 color,
             )?;
@@ -834,7 +835,7 @@ fn _visualize_optimization_step(
     let window_trajectory: Vec<[f32; 3]> = world.frames[window_start..=frame_idx]
         .iter()
         .map(|frame| {
-            let t = &frame.pose.translation;
+            let t = frame.world_pose().translation;
             [t.x as f32, t.y as f32, t.z as f32]
         })
         .collect();
@@ -857,10 +858,8 @@ fn visualize_stereo_camera(
     stereo_camera: &StereoCamera<f64>,
     color: [u8; 4],  // RGBA color for the camera
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Convert rotation matrix to 3x3 array
-
-    let camera_rot = pose.rotation.matrix; //.inverse();
-
+    // Convert rotation to 3x3 array for Rerun visualization
+    let camera_rot = pose.rotation.to_matrix();
     let camera_rot_for_rerun = camera_rot.inverse();
     let rot_matrix = [
         [camera_rot_for_rerun.m00() as f32, camera_rot_for_rerun.m01() as f32, camera_rot_for_rerun.m02() as f32],
