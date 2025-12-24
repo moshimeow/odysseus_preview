@@ -1,18 +1,20 @@
 //! Optimization and bundle adjustment
 
 use crate::camera::StereoCamera;
+use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::math::SE3;
-use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::world_state::WorldState;
-use nalgebra::{SymmetricEigen, Cholesky, DMatrix, DVector};
+use nalgebra::{Cholesky, DMatrix, DVector, SymmetricEigen};
 use odysseus_solver::math3d::Vec3;
+use odysseus_solver::{
+    build_slam_entries, sparse_solver::build_jacobian, SparseLevenbergMarquardt,
+};
 use odysseus_solver::{Jet, Real};
-use odysseus_solver::{SparseLevenbergMarquardt, build_slam_entries, sparse_solver::build_jacobian};
-use std::collections::{HashMap, HashSet};
 use sprs::CsMat;
+use std::collections::{HashMap, HashSet};
 
-
+pub mod vio;
 
 #[derive(Clone)]
 pub struct MarginalizedPrior {
@@ -108,7 +110,7 @@ pub fn run_bundle_adjustment(
     config: &BundleAdjustmentConfig,
 ) -> BundleAdjustmentResult {
     // ========== 1. Collect observations and select active points ==========
-    
+
     let mut all_obs: Vec<StereoObservation> = Vec::new();
     let mut score_map: HashMap<usize, f64> = HashMap::new();
 
@@ -125,7 +127,7 @@ pub fn run_bundle_adjustment(
             }
         }
     }
-    
+
     // Sort points by score descending, truncate to max
     let mut scored_points: Vec<_> = score_map.clone().into_iter().collect();
     scored_points.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -133,11 +135,12 @@ pub fn run_bundle_adjustment(
     let all_point_ids: Vec<usize> = scored_points.into_iter().map(|(id, _)| id).collect();
 
     // Partition into optimized and fixed points
-    let optimized_point_ids: Vec<usize> = all_point_ids.iter()
+    let optimized_point_ids: Vec<usize> = all_point_ids
+        .iter()
         .copied()
         .filter(|id| !fixed_point_ids.contains(id))
         .collect();
-    
+
     // All points we care about (for filtering observations)
     let all_points_set: HashSet<_> = all_point_ids.iter().copied().collect();
     let observations: Vec<_> = all_obs
@@ -156,12 +159,15 @@ pub fn run_bundle_adjustment(
     }
 
     // ========== 2. Build parameter mappings ==========
-    
+
     // Pose parameters
     let mut pose_to_param_idx: HashMap<usize, usize> = HashMap::new();
     let mut offset = 0;
-    
-    let optimized_frame_indices: Vec<_> = frame_graph.states.iter().enumerate()
+
+    let optimized_frame_indices: Vec<_> = frame_graph
+        .states
+        .iter()
+        .enumerate()
         .filter(|(_, s)| s.is_optimized())
         .map(|(idx, _)| idx)
         .collect();
@@ -187,15 +193,25 @@ pub fn run_bundle_adjustment(
 
     // ========== 3. Build sparsity entries ==========
 
-    let sparsity_obs: Vec<_> = observations.iter().enumerate().map(|(i, obs)| {
-        let pose_optimized = frame_graph.states[obs.camera_id].is_optimized();
-        let point_optimized = point_to_param_idx.contains_key(&obs.point_id);
+    let sparsity_obs: Vec<_> = observations
+        .iter()
+        .enumerate()
+        .map(|(i, obs)| {
+            let pose_optimized = frame_graph.states[obs.camera_id].is_optimized();
+            let point_optimized = point_to_param_idx.contains_key(&obs.point_id);
 
-        let pose_start = pose_to_param_idx.get(&obs.camera_id).copied().unwrap_or(0);
-        let point_start = point_to_param_idx.get(&obs.point_id).copied().unwrap_or(0);
+            let pose_start = pose_to_param_idx.get(&obs.camera_id).copied().unwrap_or(0);
+            let point_start = point_to_param_idx.get(&obs.point_id).copied().unwrap_or(0);
 
-        (i * 4, pose_start, point_start, pose_optimized, point_optimized)
-    }).collect();
+            (
+                i * 4,
+                pose_start,
+                point_start,
+                pose_optimized,
+                point_optimized,
+            )
+        })
+        .collect();
 
     let n_params = n_poses * 6 + n_optimized_points * 3;
     let n_obs_residuals = n_observations * 4;
@@ -248,7 +264,7 @@ pub fn run_bundle_adjustment(
         initial_params[param_idx + 4] = pose.translation.y;
         initial_params[param_idx + 5] = pose.translation.z;
     }
-    
+
     for &point_id in &optimized_point_ids {
         let param_idx = point_to_param_idx[&point_id];
         let point = world.get_point(point_id).unwrap();
@@ -258,7 +274,7 @@ pub fn run_bundle_adjustment(
     }
 
     // ========== 5. Solve ==========
-    
+
     // Handle case where there are no parameters to optimize
     if n_params == 0 {
         return BundleAdjustmentResult {
@@ -333,7 +349,8 @@ pub fn run_bundle_adjustment(
         // A point is "unique to marginalized frames" if all its observations come from marginalized frames
         let mut unique_point_ids: Vec<usize> = Vec::new();
         for (&point_id, _) in &point_to_param_idx {
-            let observing_frames: HashSet<usize> = observations.iter()
+            let observing_frames: HashSet<usize> = observations
+                .iter()
                 .filter(|obs| obs.point_id == point_id)
                 .map(|obs| obs.camera_id)
                 .collect();
@@ -424,7 +441,10 @@ pub fn run_bundle_adjustment(
 
             // Check eigenvalues and regularize if needed
             let eigen = SymmetricEigen::new(h_marg.clone());
-            let min_eigenvalue = eigen.eigenvalues.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let min_eigenvalue = eigen
+                .eigenvalues
+                .iter()
+                .fold(f64::INFINITY, |a, &b| a.min(b));
             if min_eigenvalue < 1e-8 {
                 let regularization = 1e-6 - min_eigenvalue.min(0.0);
                 for i in 0..h_marg.nrows() {
@@ -447,10 +467,8 @@ pub fn run_bundle_adjustment(
                 }
             };
             let sqrt_information = cholesky.l();
-            let linearization_point = DVector::from_iterator(
-                n_new,
-                keep_indices.iter().map(|&i| optimized_params[i]),
-            );
+            let linearization_point =
+                DVector::from_iterator(n_new, keep_indices.iter().map(|&i| optimized_params[i]));
 
             // Track which camera frame IDs and point IDs are in the kept parameters
             // Build reverse mappings: param_start -> frame_id or point_id
@@ -506,9 +524,11 @@ pub fn run_bundle_adjustment(
             optimized_params[param_idx + 4],
             optimized_params[param_idx + 5],
         );
-        world.frames[frame_idx].pose.set_from_params(rot_delta, translation);
+        world.frames[frame_idx]
+            .pose
+            .set_from_params(rot_delta, translation);
     }
-    
+
     for &point_id in &optimized_point_ids {
         let param_idx = point_to_param_idx[&point_id];
         let new_position = Vec3::new(
@@ -531,7 +551,7 @@ pub fn run_bundle_adjustment(
 // ========== Helper functions ==========
 
 /// Dispatch code over different Jet sizes based on two runtime conditions.
-/// 
+///
 /// Handles all 4 combinations of (cond1, cond2) with appropriate Jet sizes.
 /// The Jet size is computed as: size1 * cond1 + size2 * cond2
 /// Outputs constant flags to placate the array bounds checker
@@ -558,9 +578,9 @@ macro_rules! with_jet_size {
         }
         match ($cond1, $cond2) {
             (false, false) => arm!(false, false, 0),
-            (false, true)  => arm!(false, true, $size2),
-            (true, false)  => arm!(true, false, $size1),
-            (true, true)   => arm!(true, true, { $size1 + $size2 }),
+            (false, true) => arm!(false, true, $size2),
+            (true, false) => arm!(true, false, $size1),
+            (true, true) => arm!(true, true, { $size1 + $size2 }),
         }
     }};
 }
@@ -588,7 +608,7 @@ fn jet_variables<const N: usize, const D: usize, P: std::ops::Index<usize, Outpu
 /// This keeps rotation parameters small, avoiding the rotation vector singularity at 2π.
 pub fn stereo_reprojection_residual_host_relative<T: Real>(
     rotation_host: &odysseus_solver::math3d::Quat<f64>,
-    pose_params: &[T; 6],  // [rotation_delta (3), translation (3)]
+    pose_params: &[T; 6], // [rotation_delta (3), translation (3)]
     world_point: &[T; 3],
     stereo_camera: &StereoCamera<T>,
     observed_left_u: T,
@@ -612,10 +632,8 @@ pub fn stereo_reprojection_residual_host_relative<T: Real>(
 
     // Build world_T_camera pose
     let translation = Vec3::new(pose_params[3], pose_params[4], pose_params[5]);
-    let world_t_camera = SE3::from_rotation_translation(
-        crate::math::SO3 { quat: q_new },
-        translation,
-    );
+    let world_t_camera =
+        SE3::from_rotation_translation(crate::math::SO3 { quat: q_new }, translation);
 
     // Transform world point to camera frame
     let camera_t_world = world_t_camera.inverse();
@@ -653,7 +671,11 @@ fn get_point_xyz(
     world: &WorldState,
 ) -> [f64; 3] {
     if let Some(&param_idx) = point_to_param_idx.get(&point_id) {
-        [params[param_idx], params[param_idx + 1], params[param_idx + 2]]
+        [
+            params[param_idx],
+            params[param_idx + 1],
+            params[param_idx + 2],
+        ]
     } else {
         let point = world.get_point(point_id).unwrap();
         [point.x, point.y, point.z]
