@@ -126,10 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gravity,
         &trajectory,
         args.duration,
+        &noise_params,
     )?;
-
-    // Test preintegration
-    test_preintegration(&poses, &imu_measurements, &noise_params)?;
 
     println!("\nVisualization complete. Check Rerun viewer.");
     println!("  Green = Ground truth trajectory");
@@ -214,6 +212,7 @@ fn dead_reckon_and_visualize(
     gravity: Vector3<f64>,
     trajectory: &dyn ContinuousTrajectory,
     total_duration: f64,
+    noise_params: &ImuNoiseParams,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if measurements.is_empty() || gt_poses.is_empty() {
         return Ok(());
@@ -231,7 +230,9 @@ fn dead_reckon_and_visualize(
     let mut rotation = start_pose.rotation;
 
     // Initial velocity should match the trajectory at t=0
-    let mut velocity = if gt_poses.len() >= 2 {
+    // numerical recovery of velocity from trajectory
+    // in a real system the optimizer would figure this out
+    let velocity = if gt_poses.len() >= 2 {
         let p0 = gt_poses[0].1.translation;
         let p1 = gt_poses[1].1.translation;
 
@@ -261,8 +262,14 @@ fn dead_reckon_and_visualize(
     let mut dr_positions: Vec<[f32; 3]> =
         vec![[position.x as f32, position.y as f32, position.z as f32]];
 
-    // Process each IMU measurement
-    let mut prev_time = 0.0; // The trajectory and first measurement interval start at 0.0
+    // Process each IMU measurement using PreintegratedImu
+    let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
+    let mut prev_time = 0.0;
+
+    let start_rotation = rotation;
+    let start_velocity = odysseus_solver::math3d::Vec3::new(velocity.x, velocity.y, velocity.z);
+    let start_position = odysseus_solver::math3d::Vec3::new(position.x, position.y, position.z);
+    let gravity_vec = odysseus_solver::math3d::Vec3::new(gravity.x, gravity.y, gravity.z);
 
     for m in measurements.iter() {
         let dt = m.timestamp - prev_time;
@@ -271,37 +278,33 @@ fn dead_reckon_and_visualize(
             continue;
         }
 
-        // Midpoint integration: use rotation at middle of interval for acceleration transform
-        // This correctly handles the fact that IMU reports average acceleration over the interval
+        // Integrate measurement into preintegration state
+        preint.integrate(
+            m,
+            dt,
+            noise_params.gyro_noise_density,
+            noise_params.accel_noise_density,
+        );
 
-        // Compute half rotation increment
-        let omega = m.gyro * dt;
-        let half_omega =
-            odysseus_solver::math3d::Vec3::new(omega.x * 0.5, omega.y * 0.5, omega.z * 0.5);
-        let half_delta_rot = SO3::exp(half_omega);
+        // Recover current world-frame state from preintegrated deltas
+        // This is exactly what a VIO frontend does between keyframes
+        let dp = preint.delta_position;
+        let t = preint.delta_time;
 
-        // Rotation at midpoint of interval
-        let rotation_mid = (rotation * half_delta_rot).normalize();
+        // R_j = R_i * ΔR (delta_rotation is now stored as quaternion directly)
+        let delta_r = SO3 {
+            quat: preint.delta_rotation,
+        };
+        rotation = (start_rotation * delta_r).normalize();
 
-        // Transform acceleration using midpoint rotation
-        // IMU measures specific force: a_imu = a_motion - g_body
-        let accel_body = odysseus_solver::math3d::Vec3::new(m.accel.x, m.accel.y, m.accel.z);
-        let accel_world_vec = rotation_mid.rotate(accel_body);
-        let accel_world = Vector3::new(accel_world_vec.x, accel_world_vec.y, accel_world_vec.z);
+        // p_j = p_i + v_i*Δt + 0.5*g*Δt² + R_i * Δp
+        let current_position = start_position
+            + start_velocity * t
+            + gravity_vec * (0.5 * t * t)
+            + start_rotation.rotate(odysseus_solver::math3d::Vec3::new(dp.x, dp.y, dp.z));
 
-        // Add gravity to get total acceleration
-        // a_world = R_mid * a_imu + g
-        let total_accel = accel_world + gravity;
-
-        // Update velocity and position
-        position += velocity * dt + 0.5 * total_accel * dt * dt;
-        velocity += total_accel * dt;
-
-        // Full rotation update
-        let delta_rot = SO3::exp(odysseus_solver::math3d::Vec3::new(
-            omega.x, omega.y, omega.z,
-        ));
-        rotation = (rotation * delta_rot).normalize();
+        // Update velocity and position for final reporting (though we use start_ values in the loop)
+        position = Vector3::new(current_position.x, current_position.y, current_position.z);
 
         // Store position for visualization
         dr_positions.push([position.x as f32, position.y as f32, position.z as f32]);
@@ -404,102 +407,4 @@ fn print_imu_samples(measurements: &[ImuMeasurement]) {
         "  Accel magnitude: {:.4} m/s² (expect ~9.81 from gravity)",
         accel_mean.norm()
     );
-}
-
-/// Test preintegration accuracy
-fn test_preintegration(
-    poses: &[(f64, SE3<f64>)],
-    measurements: &[ImuMeasurement],
-    noise_params: &ImuNoiseParams,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== Testing Preintegration ===");
-
-    // Find measurements between first and last pose
-    let start_time = poses[0].0;
-    let end_time = poses[poses.len() - 1].0;
-
-    let relevant_measurements: Vec<_> = measurements
-        .iter()
-        .filter(|m| m.timestamp >= start_time && m.timestamp <= end_time)
-        .cloned()
-        .collect();
-
-    println!(
-        "Using {} measurements from t={:.3} to t={:.3}",
-        relevant_measurements.len(),
-        start_time,
-        end_time
-    );
-
-    // Preintegrate
-    let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
-    preint.integrate_measurements(
-        &relevant_measurements,
-        noise_params.gyro_noise_density,
-        noise_params.accel_noise_density,
-    );
-
-    println!("\nPreintegration results:");
-    println!(
-        "  Delta rotation (rotvec): [{:.4}, {:.4}, {:.4}] rad",
-        preint.delta_rotation.x, preint.delta_rotation.y, preint.delta_rotation.z
-    );
-    println!(
-        "  Delta rotation magnitude: {:.4} rad ({:.2} deg)",
-        preint.delta_rotation.norm(),
-        preint.delta_rotation.norm().to_degrees()
-    );
-    println!(
-        "  Delta velocity: [{:.4}, {:.4}, {:.4}] m/s",
-        preint.delta_velocity.x, preint.delta_velocity.y, preint.delta_velocity.z
-    );
-    println!(
-        "  Delta position: [{:.4}, {:.4}, {:.4}] m",
-        preint.delta_position.x, preint.delta_position.y, preint.delta_position.z
-    );
-    println!("  Delta time: {:.4} s", preint.delta_time);
-
-    // Compare with ground truth pose change
-    let pose_start = &poses[0].1;
-    let pose_end = &poses[poses.len() - 1].1;
-
-    // Ground truth relative pose
-    let rel_pose = pose_start.inverse() * *pose_end;
-    let gt_rotation = rel_pose.rotation.log();
-    let gt_translation = rel_pose.translation;
-
-    println!("\nGround truth (pose difference):");
-    println!(
-        "  Rotation: [{:.4}, {:.4}, {:.4}] rad ({:.2} deg)",
-        gt_rotation.x,
-        gt_rotation.y,
-        gt_rotation.z,
-        (gt_rotation.x * gt_rotation.x
-            + gt_rotation.y * gt_rotation.y
-            + gt_rotation.z * gt_rotation.z)
-            .sqrt()
-            .to_degrees()
-    );
-    println!(
-        "  Translation: [{:.4}, {:.4}, {:.4}] m",
-        gt_translation.x, gt_translation.y, gt_translation.z
-    );
-
-    // Rotation error
-    let rot_error =
-        preint.delta_rotation - Vector3::new(gt_rotation.x, gt_rotation.y, gt_rotation.z);
-    println!(
-        "\nRotation error: [{:.4}, {:.4}, {:.4}] rad ({:.2} deg)",
-        rot_error.x,
-        rot_error.y,
-        rot_error.z,
-        rot_error.norm().to_degrees()
-    );
-
-    println!(
-        "\nNote: Position/velocity comparison requires gravity compensation in residual function."
-    );
-    println!("The preintegration values are in the start body frame and include accumulated gravity effects.");
-
-    Ok(())
 }

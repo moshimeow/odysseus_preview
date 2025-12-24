@@ -3,13 +3,15 @@
 //! Provides a simplified optimizer for testing IMU factors in isolation.
 //! This is useful for validating the IMU residuals before integrating with visual SLAM.
 
-use nalgebra::{DVector, Vector3};
+use nalgebra::DVector;
+#[cfg(test)]
+use nalgebra::Vector3;
 use odysseus_solver::math3d::Quat;
 use odysseus_solver::sparse_solver::SparseLevenbergMarquardt;
 use odysseus_solver::Jet;
 
 use super::preintegration::PreintegratedImu;
-use super::residuals::{imu_preintegration_residual, bias_residual};
+use super::residuals::{bias_residual, imu_preintegration_residual};
 use super::simulator::ImuNoiseParams;
 
 /// Number of parameters per frame in VIO optimization
@@ -342,14 +344,8 @@ fn compute_imu_residual_with_jacobian(
     ];
 
     // Compute residual
-    let res = imu_preintegration_residual(
-        host_i,
-        &params_i,
-        host_j,
-        &params_j,
-        preint,
-        &gravity_jet,
-    );
+    let res =
+        imu_preintegration_residual(host_i, &params_i, host_j, &params_j, preint, &gravity_jet);
 
     // Extract residuals and Jacobians
     for r in 0..IMU_RESIDUALS {
@@ -395,13 +391,7 @@ fn compute_bias_residual_with_jacobian(
     let accel_bias_rw = noise_params.accel_bias_random_walk.max(1e-6);
 
     // Compute residual
-    let res = bias_residual(
-        &bg_i, &ba_i,
-        &bg_j, &ba_j,
-        dt,
-        gyro_bias_rw,
-        accel_bias_rw,
-    );
+    let res = bias_residual(&bg_i, &ba_i, &bg_j, &ba_j, dt, gyro_bias_rw, accel_bias_rw);
 
     // Weights for Jacobian
     let dt_sqrt = dt.sqrt().max(1e-6);
@@ -420,7 +410,7 @@ fn compute_bias_residual_with_jacobian(
         // Frame i bias derivatives (indices 9-14 in full state)
         if optimize_i {
             for p in 9..PARAMS_PER_FRAME {
-                let bias_idx = p - 9;  // 0-5
+                let bias_idx = p - 9; // 0-5
                 if bias_idx == r {
                     jacobian_data[*jac_idx] = -weight;
                 } else {
@@ -448,9 +438,9 @@ fn compute_bias_residual_with_jacobian(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imu::simulator::{add_timestamps_to_poses, ImuNoiseParams};
     use crate::imu::{ImuSimulator, PreintegratedImu};
-    use crate::imu::simulator::{ImuNoiseParams, add_timestamps_to_poses};
-    use crate::trajectory::{TrajectoryGenerator, CircularTrajectory};
+    use crate::trajectory::{ContinuousCircularTrajectory, ContinuousTrajectory};
 
     #[test]
     fn test_imu_only_optimization_identity() {
@@ -459,14 +449,11 @@ mod tests {
         let host_quats = vec![host_quat, host_quat];
 
         // Both frames at origin with zero velocity/bias
-        let initial_states = vec![
-            [0.0; PARAMS_PER_FRAME],
-            [0.0; PARAMS_PER_FRAME],
-        ];
+        let initial_states = vec![[0.0; PARAMS_PER_FRAME], [0.0; PARAMS_PER_FRAME]];
 
         // Preintegration with small dt but zero motion
         let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
-        preint.delta_time = 0.1;  // 100ms between frames
+        preint.delta_time = 0.1; // 100ms between frames
 
         let gravity = [0.0, 0.0, -9.81];
         let noise_params = ImuNoiseParams::consumer_grade();
@@ -477,13 +464,20 @@ mod tests {
             &[preint],
             gravity,
             &noise_params,
-            true,  // Fix first pose
+            true, // Fix first pose
         );
 
-        println!("Identity test - Error: {}, Iterations: {}", result.final_error, result.iterations);
+        println!(
+            "Identity test - Error: {}, Iterations: {}",
+            result.final_error, result.iterations
+        );
 
         // Should have very small error
-        assert!(result.final_error < 1.0, "Error too large: {}", result.final_error);
+        assert!(
+            result.final_error < 1.0,
+            "Error too large: {}",
+            result.final_error
+        );
     }
 
     #[test]
@@ -493,7 +487,7 @@ mod tests {
         let host_quats = vec![host_quat, host_quat];
 
         let gravity = [0.0, 0.0, -9.81];
-        let noise_params = ImuNoiseParams::zero();  // No noise for clean test
+        let noise_params = ImuNoiseParams::zero(); // No noise for clean test
 
         // Frame 0 at origin, frame 1 translated by [1, 0, 0] with velocity
         // For constant velocity motion: p1 = p0 + v0*dt
@@ -502,11 +496,11 @@ mod tests {
         let velocity = 1.0;
 
         let mut state0 = [0.0; PARAMS_PER_FRAME];
-        state0[6] = velocity;  // velocity x
+        state0[6] = velocity; // velocity x
 
         let mut state1 = [0.0; PARAMS_PER_FRAME];
-        state1[3] = velocity * dt;  // translation x = v * t
-        state1[6] = velocity;  // same velocity
+        state1[3] = velocity * dt; // translation x = v * t
+        state1[6] = velocity; // same velocity
 
         let initial_states = vec![state0, state1];
 
@@ -527,25 +521,33 @@ mod tests {
             true,
         );
 
-        println!("Translation test - Error: {}, Iterations: {}",
-                 result.final_error, result.iterations);
+        println!(
+            "Translation test - Error: {}, Iterations: {}",
+            result.final_error, result.iterations
+        );
 
         // Should converge
-        assert!(result.final_error < 1.0, "Error too large: {}", result.final_error);
+        assert!(
+            result.final_error < 1.0,
+            "Error too large: {}",
+            result.final_error
+        );
     }
 
     #[test]
     fn test_imu_optimization_convergence() {
         // Test with simulated IMU data
         // Use 10 poses to ensure enough measurements between each pair
-        let trajectory = CircularTrajectory::new(1.0);
-        let poses = trajectory.generate(10, 42);
-        let timestamped = add_timestamps_to_poses(poses.clone(), 4.0);
+        let duration = 4.0;
+        let trajectory = ContinuousCircularTrajectory::new(1.0, duration);
+        let poses = trajectory.sample_poses(10);
+        let timestamped = add_timestamps_to_poses(poses.clone(), duration);
 
         // Generate IMU measurements
         let noise_params = ImuNoiseParams::zero();
         let simulator = ImuSimulator::new(noise_params.clone(), 200.0);
-        let measurements = simulator.generate_from_trajectory(&timestamped, 123);
+        let measurements =
+            simulator.generate_from_continuous_trajectory(&trajectory, duration, 123);
 
         // Build host quaternions and initial states from ground truth
         let mut host_quats = Vec::new();
@@ -555,7 +557,7 @@ mod tests {
             // Host quaternion from pose rotation
             let rot_log = pose.rotation.log();
             let host_quat = Quat::from_axis_angle(odysseus_solver::math3d::Vec3::new(
-                rot_log.x, rot_log.y, rot_log.z
+                rot_log.x, rot_log.y, rot_log.z,
             ));
             host_quats.push(host_quat);
 
@@ -567,9 +569,9 @@ mod tests {
             state[5] = pose.translation.z;
             // velocity - approximate from position difference
             if i > 0 {
-                let dt = t - timestamped[i-1].0;
+                let dt = t - timestamped[i - 1].0;
                 if dt > 0.0 {
-                    let prev_pose = &timestamped[i-1].1;
+                    let prev_pose = &timestamped[i - 1].1;
                     state[6] = (pose.translation.x - prev_pose.translation.x) / dt;
                     state[7] = (pose.translation.y - prev_pose.translation.y) / dt;
                     state[8] = (pose.translation.z - prev_pose.translation.z) / dt;
@@ -584,11 +586,12 @@ mod tests {
         let mut preintegrations = Vec::new();
         let mut valid_frame_indices = vec![0usize]; // Start with frame 0
 
-        for i in 0..timestamped.len()-1 {
+        for i in 0..timestamped.len() - 1 {
             let t_start = timestamped[i].0;
-            let t_end = timestamped[i+1].0;
+            let t_end = timestamped[i + 1].0;
 
-            let relevant: Vec<_> = measurements.iter()
+            let relevant: Vec<_> = measurements
+                .iter()
                 .filter(|m| m.timestamp >= t_start && m.timestamp <= t_end)
                 .cloned()
                 .collect();
@@ -608,15 +611,25 @@ mod tests {
         let host_quats: Vec<_> = valid_frame_indices.iter().map(|&i| host_quats[i]).collect();
         let gt_states: Vec<_> = valid_frame_indices.iter().map(|&i| gt_states[i]).collect();
 
-        println!("Generated {} measurements, {} valid preintegrations, {} frames",
-                 measurements.len(), preintegrations.len(), valid_frame_indices.len());
-        assert!(valid_frame_indices.len() >= 3, "Need at least 3 valid frames");
-        assert!(!preintegrations.is_empty(), "Need at least one preintegration");
+        println!(
+            "Generated {} measurements, {} valid preintegrations, {} frames",
+            measurements.len(),
+            preintegrations.len(),
+            valid_frame_indices.len()
+        );
+        assert!(
+            valid_frame_indices.len() >= 3,
+            "Need at least 3 valid frames"
+        );
+        assert!(
+            !preintegrations.is_empty(),
+            "Need at least one preintegration"
+        );
 
         // Perturb initial guess
         let mut perturbed_states = gt_states.clone();
         for state in perturbed_states.iter_mut().skip(1) {
-            state[3] += 0.1;  // Add 10cm error to translation
+            state[3] += 0.1; // Add 10cm error to translation
             state[4] += 0.05;
         }
 
@@ -631,8 +644,10 @@ mod tests {
             true,
         );
 
-        println!("Convergence test - Final error: {}, Iterations: {}, Converged: {}",
-                 result.final_error, result.iterations, result.converged);
+        println!(
+            "Convergence test - Final error: {}, Iterations: {}, Converged: {}",
+            result.final_error, result.iterations, result.converged
+        );
 
         // Should reduce error significantly
         assert!(result.iterations > 0, "Should run at least one iteration");

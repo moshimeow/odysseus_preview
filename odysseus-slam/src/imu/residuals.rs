@@ -5,10 +5,10 @@
 //!
 //! These residual functions support autodiff via the Real trait.
 
+use super::preintegration::PreintegratedImu;
 use nalgebra::Vector3;
 use odysseus_solver::math3d::{Quat, Vec3};
 use odysseus_solver::Real;
-use super::preintegration::PreintegratedImu;
 
 /// IMU preintegration residual (9 DOF)
 ///
@@ -26,11 +26,11 @@ use super::preintegration::PreintegratedImu;
 pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     // Frame i parameters
     rotation_host_i: &Quat<f64>,
-    pose_params_i: &[T],  // [rot_delta, trans, vel, bg, ba] - 15 elements
+    pose_params_i: &[T], // [rot_delta, trans, vel, bg, ba] - 15 elements
 
     // Frame j parameters
     rotation_host_j: &Quat<f64>,
-    pose_params_j: &[T],  // [rot_delta, trans, vel, bg, ba] - 15 elements
+    pose_params_j: &[T], // [rot_delta, trans, vel, bg, ba] - 15 elements
 
     // Preintegrated measurement
     preint: &PreintegratedImu,
@@ -95,9 +95,9 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     // === Rotation Residual ===
     // r_R = Log(ΔR_corrected^T * R_i^T * R_j)
     let r_i_inv = r_i.conjugate();
-    let r_ij = r_i_inv * r_j;  // R_i^T * R_j
+    let r_ij = r_i_inv * r_j; // R_i^T * R_j
     let delta_r_inv = delta_r_quat.conjugate();
-    let r_error = delta_r_inv * r_ij;  // ΔR^T * R_i^T * R_j
+    let r_error = delta_r_inv * r_ij; // ΔR^T * R_i^T * R_j
     let rot_residual = r_error.to_axis_angle();
 
     // === Velocity Residual ===
@@ -130,9 +130,15 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     );
 
     [
-        rot_residual.x, rot_residual.y, rot_residual.z,
-        vel_residual.x, vel_residual.y, vel_residual.z,
-        pos_residual.x, pos_residual.y, pos_residual.z,
+        rot_residual.x,
+        rot_residual.y,
+        rot_residual.z,
+        vel_residual.x,
+        vel_residual.y,
+        vel_residual.z,
+        pos_residual.x,
+        pos_residual.y,
+        pos_residual.z,
     ]
 }
 
@@ -217,19 +223,21 @@ mod tests {
 
         // Frame i and j at same position/velocity
         let pose_params: [f64; 15] = [
-            0.0, 0.0, 0.0,  // rotation delta
-            0.0, 0.0, 0.0,  // translation
-            0.0, 0.0, 0.0,  // velocity
-            0.0, 0.0, 0.0,  // gyro bias
-            0.0, 0.0, 0.0,  // accel bias
+            0.0, 0.0, 0.0, // rotation delta
+            0.0, 0.0, 0.0, // translation
+            0.0, 0.0, 0.0, // velocity
+            0.0, 0.0, 0.0, // gyro bias
+            0.0, 0.0, 0.0, // accel bias
         ];
 
         // Zero preintegration (identity)
         let preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
 
         let residual = imu_preintegration_residual(
-            &host_quat, &pose_params,
-            &host_quat, &pose_params,
+            &host_quat,
+            &pose_params,
+            &host_quat,
+            &pose_params,
             &preint,
             &gravity,
         );
@@ -247,31 +255,26 @@ mod tests {
         let gravity = [0.0, 0.0, -9.81];
 
         let pose_i: [f64; 15] = [
-            0.0, 0.0, 0.0,  // rotation delta
-            0.0, 0.0, 0.0,  // translation
-            0.0, 0.0, 0.0,  // velocity
-            0.0, 0.0, 0.0,  // gyro bias
-            0.0, 0.0, 0.0,  // accel bias
+            0.0, 0.0, 0.0, // rotation delta
+            0.0, 0.0, 0.0, // translation
+            0.0, 0.0, 0.0, // velocity
+            0.0, 0.0, 0.0, // gyro bias
+            0.0, 0.0, 0.0, // accel bias
         ];
 
-        let rot_amount = 0.1;  // 0.1 radians around z
+        let rot_amount = 0.1; // 0.1 radians around z
         let pose_j: [f64; 15] = [
-            0.0, 0.0, rot_amount,  // rotation delta
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
+            0.0, 0.0, rot_amount, // rotation delta
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
 
         // Preintegration with matching rotation
         let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
-        preint.delta_rotation = Vector3::new(0.0, 0.0, rot_amount);
+        preint.delta_rotation =
+            Quat::from_axis_angle(Vec3::new(0.0, 0.0, rot_amount));
 
         let residual = imu_preintegration_residual(
-            &host_quat, &pose_i,
-            &host_quat, &pose_j,
-            &preint,
-            &gravity,
+            &host_quat, &pose_i, &host_quat, &pose_j, &preint, &gravity,
         );
 
         // Rotation residual should be near zero
@@ -298,7 +301,7 @@ mod tests {
     fn test_bias_residual_changing_bias() {
         let bg_i = [0.01, 0.02, 0.03];
         let ba_i = [0.1, 0.2, 0.3];
-        let bg_j = [0.011, 0.021, 0.031];  // Small change
+        let bg_j = [0.011, 0.021, 0.031]; // Small change
         let ba_j = [0.11, 0.21, 0.31];
         let dt = 0.1f64;
 
@@ -333,16 +336,13 @@ mod tests {
         for i in 0..15 {
             pose_j[i] = Jet30::variable(0.0, 15 + i);
         }
-        pose_j[2] = Jet30::variable(0.1, 17);  // Some rotation
+        pose_j[2] = Jet30::variable(0.1, 17); // Some rotation
 
         let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
-        preint.delta_rotation = Vector3::new(0.0, 0.0, 0.1);
+        preint.delta_rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 0.1));
 
         let residual = imu_preintegration_residual(
-            &host_quat, &pose_i,
-            &host_quat, &pose_j,
-            &preint,
-            &gravity,
+            &host_quat, &pose_i, &host_quat, &pose_j, &preint, &gravity,
         );
 
         // Check that we have derivatives

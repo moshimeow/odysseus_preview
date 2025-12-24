@@ -101,82 +101,6 @@ impl ImuSimulator {
         self
     }
 
-    /// Generate IMU measurements from ground truth poses
-    ///
-    /// # Arguments
-    /// * `poses` - Sequence of (timestamp, pose) pairs representing the trajectory
-    /// * `seed` - Random seed for noise generation
-    ///
-    /// # Returns
-    /// Vector of IMU measurements at the configured rate
-    pub fn generate_from_trajectory(
-        &self,
-        poses: &[(f64, SE3<f64>)],
-        seed: u64,
-    ) -> Vec<ImuMeasurement> {
-        if poses.len() < 3 {
-            return Vec::new();
-        }
-
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut measurements = Vec::new();
-
-        // Current bias state (random walk)
-        let mut gyro_bias = Vector3::zeros();
-        let mut accel_bias = Vector3::zeros();
-
-        let start_time = poses[0].0;
-        let end_time = poses[poses.len() - 1].0;
-        let dt = 1.0 / self.imu_rate;
-
-        let mut current_time = start_time + dt; // Start after first pose to have history
-
-        while current_time < end_time - dt {
-            // Find the pose index where poses[idx].0 <= current_time < poses[idx+1].0
-            let pose_idx = self.find_pose_index(poses, current_time);
-
-            if pose_idx == 0 || pose_idx + 1 >= poses.len() {
-                current_time += dt;
-                continue;
-            }
-
-            // Use three poses for acceleration computation
-            let (t_prev, pose_prev) = &poses[pose_idx - 1];
-            let (t_curr, pose_curr) = &poses[pose_idx];
-            let (t_next, pose_next) = &poses[pose_idx + 1];
-
-            // Get angular velocity and linear acceleration at this time
-            let (gyro, accel) = self.compute_imu_at_time_3point(
-                pose_prev,
-                *t_prev,
-                pose_curr,
-                *t_curr,
-                pose_next,
-                *t_next,
-                current_time,
-            );
-
-            // Add measurement noise (Gaussian)
-            let gyro_noise = self.sample_gyro_noise(&mut rng, dt);
-            let accel_noise = self.sample_accel_noise(&mut rng, dt);
-
-            // Update bias random walk
-            self.update_bias_random_walk(&mut rng, dt, &mut gyro_bias, &mut accel_bias);
-
-            // Create measurement with noise and bias
-            let measurement = ImuMeasurement::new(
-                current_time,
-                gyro + gyro_noise + gyro_bias,
-                accel + accel_noise + accel_bias,
-            );
-
-            measurements.push(measurement);
-            current_time += dt;
-        }
-
-        measurements
-    }
-
     /// Generate IMU measurements from a continuous trajectory with analytical derivatives
     ///
     /// This method uses the trajectory's analytical velocity to compute acceleration
@@ -276,94 +200,6 @@ impl ImuSimulator {
         measurements
     }
 
-    /// Find the pose index where poses[idx].0 <= time < poses[idx+1].0
-    fn find_pose_index(&self, poses: &[(f64, SE3<f64>)], time: f64) -> usize {
-        for i in 0..poses.len() - 1 {
-            if poses[i].0 <= time && time < poses[i + 1].0 {
-                return i;
-            }
-        }
-        poses.len() - 2
-    }
-
-    /// Compute ideal (noise-free) IMU readings using 3-point stencil for acceleration
-    fn compute_imu_at_time_3point(
-        &self,
-        pose_prev: &SE3<f64>,
-        t_prev: f64,
-        pose_curr: &SE3<f64>,
-        t_curr: f64,
-        pose_next: &SE3<f64>,
-        t_next: f64,
-        current_time: f64,
-    ) -> (Vector3<f64>, Vector3<f64>) {
-        // Compute velocities using finite differences
-        let dt_prev = t_curr - t_prev;
-        let dt_next = t_next - t_curr;
-
-        // Velocity at t_curr (backward difference)
-        let v_prev = Vector3::new(
-            (pose_curr.translation.x - pose_prev.translation.x) / dt_prev,
-            (pose_curr.translation.y - pose_prev.translation.y) / dt_prev,
-            (pose_curr.translation.z - pose_prev.translation.z) / dt_prev,
-        );
-
-        // Velocity at t_next (forward difference from curr)
-        let v_next = Vector3::new(
-            (pose_next.translation.x - pose_curr.translation.x) / dt_next,
-            (pose_next.translation.y - pose_curr.translation.y) / dt_next,
-            (pose_next.translation.z - pose_curr.translation.z) / dt_next,
-        );
-
-        // Acceleration at t_curr (central difference of velocity)
-        let dt_mid = (dt_prev + dt_next) / 2.0;
-        let accel_world = (v_next - v_prev) / dt_mid;
-
-        // Angular velocity: from relative rotation between adjacent poses
-        let r_curr = pose_curr.rotation;
-        let r_next = pose_next.rotation;
-        let r_rel = r_curr.inverse() * r_next;
-        let omega_vec = r_rel.log();
-        let omega = Vector3::new(omega_vec.x, omega_vec.y, omega_vec.z) / dt_next;
-
-        // Interpolate rotation for body frame at current_time
-        let alpha = (current_time - t_curr) / dt_next;
-        let tangent_curr = pose_curr.log();
-        let tangent_next = pose_next.log();
-        let tangent_interp = [
-            tangent_curr[0] * (1.0 - alpha) + tangent_next[0] * alpha,
-            tangent_curr[1] * (1.0 - alpha) + tangent_next[1] * alpha,
-            tangent_curr[2] * (1.0 - alpha) + tangent_next[2] * alpha,
-            tangent_curr[3] * (1.0 - alpha) + tangent_next[3] * alpha,
-            tangent_curr[4] * (1.0 - alpha) + tangent_next[4] * alpha,
-            tangent_curr[5] * (1.0 - alpha) + tangent_next[5] * alpha,
-        ];
-        let pose_interp = SE3::exp(tangent_interp);
-
-        // Transform to body frame
-        let r_body_from_world = pose_interp.rotation.inverse();
-
-        // Transform gravity to body frame
-        let gravity_body_vec = r_body_from_world.rotate(odysseus_solver::math3d::Vec3::new(
-            self.gravity.x,
-            self.gravity.y,
-            self.gravity.z,
-        ));
-        let gravity_body = Vector3::new(gravity_body_vec.x, gravity_body_vec.y, gravity_body_vec.z);
-
-        // Transform motion acceleration to body frame
-        let accel_world_vec =
-            odysseus_solver::math3d::Vec3::new(accel_world.x, accel_world.y, accel_world.z);
-        let accel_body_vec = r_body_from_world.rotate(accel_world_vec);
-        let accel_motion_body = Vector3::new(accel_body_vec.x, accel_body_vec.y, accel_body_vec.z);
-
-        // Accelerometer measures specific force: a_imu = a_motion - g_body
-        // (IMU measures the force that would be needed to produce the motion, minus gravity)
-        let accel_body = accel_motion_body - gravity_body;
-
-        (omega, accel_body)
-    }
-
     /// Sample gyroscope measurement noise (Gaussian)
     fn sample_gyro_noise<R: Rng>(&self, rng: &mut R, dt: f64) -> Vector3<f64> {
         let sigma = self.noise_params.gyro_noise_density / dt.sqrt();
@@ -442,9 +278,7 @@ pub fn add_timestamps_to_poses(poses: Vec<SE3<f64>>, total_duration: f64) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trajectory::{
-        CircularTrajectory, ContinuousCircularTrajectory, ContinuousTrajectory, TrajectoryGenerator,
-    };
+    use crate::trajectory::{ContinuousCircularTrajectory, ContinuousTrajectory};
 
     #[test]
     fn test_imu_simulator_creation() {
@@ -458,52 +292,6 @@ mod tests {
         let sim = ImuSimulator::ideal(100.0);
         assert_eq!(sim.noise_params.gyro_noise_density, 0.0);
         assert_eq!(sim.noise_params.accel_noise_density, 0.0);
-    }
-
-    #[test]
-    fn test_generate_from_stationary() {
-        // Three identical poses = stationary (need 3 for 3-point stencil)
-        let pose = SE3::<f64>::identity();
-        let poses = vec![(0.0, pose), (0.5, pose), (1.0, pose)];
-
-        let sim = ImuSimulator::ideal(100.0);
-        let measurements = sim.generate_from_trajectory(&poses, 42);
-
-        // Should have measurements for 1 second at 100 Hz
-        // The 3-point stencil skips boundary regions, so expect fewer measurements
-        assert!(
-            measurements.len() >= 40 && measurements.len() <= 110,
-            "Expected 40-110 measurements, got {}",
-            measurements.len()
-        );
-
-        // Stationary: gyro should be ~0, accel should be ~-gravity in body frame
-        for m in &measurements {
-            assert!(m.gyro.norm() < 1e-6, "Gyro should be zero for stationary");
-            // Accelerometer measures -gravity when stationary
-            // With gravity = [0, 0, -9.81], and identity rotation,
-            // accel = 0 - (-9.81 in z) = [0, 0, 9.81]
-            assert!((m.accel.z - 9.81).abs() < 0.1, "Accel Z should be ~9.81");
-        }
-    }
-
-    #[test]
-    fn test_generate_from_trajectory() {
-        let traj = CircularTrajectory::new(1.0);
-        let poses = traj.generate(20, 42);
-        let timestamped = add_timestamps_to_poses(poses, 2.0);
-
-        let sim = ImuSimulator::new(ImuNoiseParams::consumer_grade(), 200.0);
-        let measurements = sim.generate_from_trajectory(&timestamped, 123);
-
-        // Should have measurements spanning the trajectory
-        assert!(!measurements.is_empty());
-        assert!(measurements.len() > 100); // At least some measurements
-
-        // Check timestamps are monotonic
-        for i in 1..measurements.len() {
-            assert!(measurements[i].timestamp > measurements[i - 1].timestamp);
-        }
     }
 
     #[test]

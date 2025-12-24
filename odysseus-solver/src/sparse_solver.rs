@@ -4,7 +4,7 @@
 //! for dramatic memory and computation savings. The Jacobians are ~98%+ sparse.
 
 use nalgebra::DVector;
-use sprs::{CsMat, TriMat, SymmetryCheck};
+use sprs::{CsMat, SymmetryCheck, TriMat};
 use sprs_ldl::Ldl;
 
 /// Result of one optimization iteration
@@ -16,13 +16,13 @@ pub struct IterationResult<T> {
     pub converged: bool,
 }
 
-pub fn build_jacobian<T>(
-    entries: &[(usize, usize)],
-    n_rows: usize,
-    n_cols: usize,
-) -> CsMat<T> 
+pub fn build_jacobian<T>(entries: &[(usize, usize)], n_rows: usize, n_cols: usize) -> CsMat<T>
 where
-    T: num_traits::Float + nalgebra::RealField + std::fmt::Display + std::iter::Sum + Default
+    T: num_traits::Float
+        + nalgebra::RealField
+        + std::fmt::Display
+        + std::iter::Sum
+        + Default
         + for<'r> std::ops::DivAssign<&'r T>
         + for<'a> std::ops::Mul<&'a T, Output = T>,
     for<'a> &'a T: std::ops::Mul<Output = T>,
@@ -47,21 +47,22 @@ pub struct SparseLevenbergMarquardt<T> {
     pub lambda_scale_down: T,
     pub verbose: bool,
 
-    // Dimensions
-    n_cols: usize,
-
     // Sparse Jacobian in CSR format (structure fixed, values updated each iteration)
     jacobian: CsMat<T>,
 
     // Dense workspace vectors
-    jtr: DVector<T>,         // J^T * r (dense, always full)
-    residuals: DVector<T>,   // Dense residual vector
+    jtr: DVector<T>,            // J^T * r (dense, always full)
+    residuals: DVector<T>,      // Dense residual vector
     temp_residuals: DVector<T>, // For trial step evaluation
 }
 
 impl<T> SparseLevenbergMarquardt<T>
 where
-    T: num_traits::Float + nalgebra::RealField + std::fmt::Display + std::iter::Sum + Default
+    T: num_traits::Float
+        + nalgebra::RealField
+        + std::fmt::Display
+        + std::iter::Sum
+        + Default
         + for<'r> std::ops::DivAssign<&'r T>
         + for<'a> std::ops::Mul<&'a T, Output = T>,
     for<'a> &'a T: std::ops::Mul<Output = T>,
@@ -89,7 +90,6 @@ where
             lambda_scale_up: T::from(10.0).unwrap(),
             lambda_scale_down: T::from(0.1).unwrap(),
             verbose: true,
-            n_cols,
             jacobian,
             jtr,
             residuals,
@@ -123,7 +123,6 @@ where
     pub fn nnz(&self) -> usize {
         self.jacobian.nnz()
     }
-
 
     /// Solve the optimization problem
     ///
@@ -347,8 +346,8 @@ mod tests {
     fn test_build_slam_entries() {
         // Simple test: 2 observations
         let observations = vec![
-            (0, 0, 6, true, true),   // residual 0-3, pose 0-5, point 6-8
-            (4, 0, 9, true, true),   // residual 4-7, pose 0-5, point 9-11
+            (0, 0, 6, true, true), // residual 0-3, pose 0-5, point 6-8
+            (4, 0, 9, true, true), // residual 4-7, pose 0-5, point 9-11
         ];
 
         let entries = build_slam_entries(&observations);
@@ -385,8 +384,7 @@ mod tests {
         // Each residual depends on both params (a and b)
         let entries: Vec<_> = (0..5).flat_map(|i| vec![(i, 0), (i, 1)]).collect();
 
-        let mut solver = SparseLevenbergMarquardt::<f64>::new(5, 2, &entries)
-            .with_verbose(false);
+        let mut solver = SparseLevenbergMarquardt::<f64>::new(5, 2, &entries).with_verbose(false);
 
         let initial = DVector::from_vec(vec![0.0, 0.0]);
 

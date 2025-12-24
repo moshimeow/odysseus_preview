@@ -88,6 +88,21 @@ impl<T: Real> std::ops::Add for Vec3<T> {
     }
 }
 
+impl<T: Real> std::ops::Mul<T> for Vec3<T> {
+    type Output = Self;
+
+    fn mul(self, scalar: T) -> Self {
+        Self {
+            x: self.x * scalar,
+            y: self.y * scalar,
+            z: self.z * scalar,
+        }
+    }
+}
+
+// Note: RHS multiplication (scalar * Vec3) is tricky with generics and orphan rules.
+// For now, we only provide Vec3 * scalar.
+
 // ============================================================================
 // Mat3 - 3x3 Matrix (column-major)
 // ============================================================================
@@ -110,15 +125,33 @@ impl<T: Copy> Mat3<T> {
     }
 
     /// Element accessors (column-major indexing)
-    pub fn m00(&self) -> T { self.x_axis.x }
-    pub fn m10(&self) -> T { self.x_axis.y }
-    pub fn m20(&self) -> T { self.x_axis.z }
-    pub fn m01(&self) -> T { self.y_axis.x }
-    pub fn m11(&self) -> T { self.y_axis.y }
-    pub fn m21(&self) -> T { self.y_axis.z }
-    pub fn m02(&self) -> T { self.z_axis.x }
-    pub fn m12(&self) -> T { self.z_axis.y }
-    pub fn m22(&self) -> T { self.z_axis.z }
+    pub fn m00(&self) -> T {
+        self.x_axis.x
+    }
+    pub fn m10(&self) -> T {
+        self.x_axis.y
+    }
+    pub fn m20(&self) -> T {
+        self.x_axis.z
+    }
+    pub fn m01(&self) -> T {
+        self.y_axis.x
+    }
+    pub fn m11(&self) -> T {
+        self.y_axis.y
+    }
+    pub fn m21(&self) -> T {
+        self.y_axis.z
+    }
+    pub fn m02(&self) -> T {
+        self.z_axis.x
+    }
+    pub fn m12(&self) -> T {
+        self.z_axis.y
+    }
+    pub fn m22(&self) -> T {
+        self.z_axis.z
+    }
 }
 
 impl<T: Real> Mat3<T> {
@@ -147,8 +180,7 @@ impl<T: Real> Mat3<T> {
         let col1 = self.y_axis;
         let col2 = self.z_axis;
 
-        col0.x * (col1.y * col2.z - col1.z * col2.y)
-            - col0.y * (col1.x * col2.z - col1.z * col2.x)
+        col0.x * (col1.y * col2.z - col1.z * col2.y) - col0.y * (col1.x * col2.z - col1.z * col2.x)
             + col0.z * (col1.x * col2.y - col1.y * col2.x)
     }
 
@@ -304,6 +336,18 @@ impl<T: Real> Quat<T> {
         }
     }
 
+    /// Rotate a 3x3 matrix by this quaternion
+    ///
+    /// Computes R * M where R is the rotation matrix equivalent to this quaternion.
+    /// This is done by rotating each column of M individually.
+    pub fn rotate_matrix(self, m: Mat3<T>) -> Mat3<T> {
+        Mat3::from_cols(
+            self.rotate_vec(m.x_axis),
+            self.rotate_vec(m.y_axis),
+            self.rotate_vec(m.z_axis),
+        )
+    }
+
     /// Exponential map: axis-angle vector to unit quaternion
     ///
     /// Given rotation vector ω (axis × angle), computes the quaternion:
@@ -394,21 +438,9 @@ impl<T: Real> Quat<T> {
         let wz = w * z;
 
         Mat3::from_cols(
-            Vec3::new(
-                T::one() - two * (yy + zz),
-                two * (xy + wz),
-                two * (xz - wy),
-            ),
-            Vec3::new(
-                two * (xy - wz),
-                T::one() - two * (xx + zz),
-                two * (yz + wx),
-            ),
-            Vec3::new(
-                two * (xz + wy),
-                two * (yz - wx),
-                T::one() - two * (xx + yy),
-            ),
+            Vec3::new(T::one() - two * (yy + zz), two * (xy + wz), two * (xz - wy)),
+            Vec3::new(two * (xy - wz), T::one() - two * (xx + zz), two * (yz + wx)),
+            Vec3::new(two * (xz + wy), two * (yz - wx), T::one() - two * (xx + yy)),
         )
     }
 }
@@ -547,7 +579,11 @@ pub fn rodrigues_to_matrix<T: Real>(rvec: Vec3<T>) -> Mat3<T> {
 }
 
 /// Apply a rigid transformation: point_transformed = R * point + translation
-pub fn transform_point<T: Real>(rotation: Mat3<T>, translation: Vec3<T>, point: Vec3<T>) -> Vec3<T> {
+pub fn transform_point<T: Real>(
+    rotation: Mat3<T>,
+    translation: Vec3<T>,
+    point: Vec3<T>,
+) -> Vec3<T> {
     let rotated = rotation.mul_vec(point);
     Vec3 {
         x: rotated.x + translation.x,
@@ -632,18 +668,30 @@ mod tests {
         // For 90 degrees: cos=0, sin=1
         // Columns: [0, 1, 0], [-1, 0, 0], [0, 0, 1]
         let rot_z_90 = Mat3 {
-            x_axis: Vec3::new(0.0, 1.0, 0.0),   // First column
-            y_axis: Vec3::new(-1.0, 0.0, 0.0),  // Second column
-            z_axis: Vec3::new(0.0, 0.0, 1.0),   // Third column
+            x_axis: Vec3::new(0.0, 1.0, 0.0),  // First column
+            y_axis: Vec3::new(-1.0, 0.0, 0.0), // Second column
+            z_axis: Vec3::new(0.0, 0.0, 1.0),  // Third column
         };
 
         // Rotating [1, 0, 0] by 90° around Z should give [0, 1, 0]
         let x_unit = Vec3::new(1.0, 0.0, 0.0);
         let result = rot_z_90.mul_vec(x_unit);
 
-        assert!((result.x - 0.0).abs() < 1e-10, "Expected x=0, got {}", result.x);
-        assert!((result.y - 1.0).abs() < 1e-10, "Expected y=1, got {}", result.y);
-        assert!((result.z - 0.0).abs() < 1e-10, "Expected z=0, got {}", result.z);
+        assert!(
+            (result.x - 0.0).abs() < 1e-10,
+            "Expected x=0, got {}",
+            result.x
+        );
+        assert!(
+            (result.y - 1.0).abs() < 1e-10,
+            "Expected y=1, got {}",
+            result.y
+        );
+        assert!(
+            (result.z - 0.0).abs() < 1e-10,
+            "Expected z=0, got {}",
+            result.z
+        );
     }
 
     #[test]
@@ -715,9 +763,21 @@ mod tests {
         let x_axis = Vec3::new(1.0, 0.0, 0.0);
         let rotated = q.rotate_vec(x_axis);
 
-        assert!((rotated.x - 0.0).abs() < 1e-5, "Expected x=0, got {}", rotated.x);
-        assert!((rotated.y - 1.0).abs() < 1e-5, "Expected y=1, got {}", rotated.y);
-        assert!((rotated.z - 0.0).abs() < 1e-5, "Expected z=0, got {}", rotated.z);
+        assert!(
+            (rotated.x - 0.0).abs() < 1e-5,
+            "Expected x=0, got {}",
+            rotated.x
+        );
+        assert!(
+            (rotated.y - 1.0).abs() < 1e-5,
+            "Expected y=1, got {}",
+            rotated.y
+        );
+        assert!(
+            (rotated.z - 0.0).abs() < 1e-5,
+            "Expected z=0, got {}",
+            rotated.z
+        );
     }
 
     #[test]
@@ -732,9 +792,21 @@ mod tests {
         let x_axis = Vec3::new(1.0, 0.0, 0.0);
         let rotated = combined.rotate_vec(x_axis);
 
-        assert!((rotated.x - (-1.0)).abs() < 1e-5, "Expected x=-1, got {}", rotated.x);
-        assert!((rotated.y - 0.0).abs() < 1e-5, "Expected y=0, got {}", rotated.y);
-        assert!((rotated.z - 0.0).abs() < 1e-5, "Expected z=0, got {}", rotated.z);
+        assert!(
+            (rotated.x - (-1.0)).abs() < 1e-5,
+            "Expected x=-1, got {}",
+            rotated.x
+        );
+        assert!(
+            (rotated.y - 0.0).abs() < 1e-5,
+            "Expected y=0, got {}",
+            rotated.y
+        );
+        assert!(
+            (rotated.z - 0.0).abs() < 1e-5,
+            "Expected z=0, got {}",
+            rotated.z
+        );
     }
 
     #[test]
@@ -771,9 +843,24 @@ mod tests {
             let r1 = q.rotate_vec(p);
             let r2 = q_recovered.rotate_vec(p);
 
-            assert!((r1.x - r2.x).abs() < 1e-4, "x mismatch: {} vs {}", r1.x, r2.x);
-            assert!((r1.y - r2.y).abs() < 1e-4, "y mismatch: {} vs {}", r1.y, r2.y);
-            assert!((r1.z - r2.z).abs() < 1e-4, "z mismatch: {} vs {}", r1.z, r2.z);
+            assert!(
+                (r1.x - r2.x).abs() < 1e-4,
+                "x mismatch: {} vs {}",
+                r1.x,
+                r2.x
+            );
+            assert!(
+                (r1.y - r2.y).abs() < 1e-4,
+                "y mismatch: {} vs {}",
+                r1.y,
+                r2.y
+            );
+            assert!(
+                (r1.z - r2.z).abs() < 1e-4,
+                "z mismatch: {} vs {}",
+                r1.z,
+                r2.z
+            );
         }
     }
 
@@ -839,9 +926,27 @@ mod tests {
             let r_quat = q.rotate_vec(p);
             let r_mat = mat.mul_vec(p);
 
-            assert!((r_quat.x - r_mat.x).abs() < 1e-4, "x mismatch for rvec {:?}: {} vs {}", rvec, r_quat.x, r_mat.x);
-            assert!((r_quat.y - r_mat.y).abs() < 1e-4, "y mismatch for rvec {:?}: {} vs {}", rvec, r_quat.y, r_mat.y);
-            assert!((r_quat.z - r_mat.z).abs() < 1e-4, "z mismatch for rvec {:?}: {} vs {}", rvec, r_quat.z, r_mat.z);
+            assert!(
+                (r_quat.x - r_mat.x).abs() < 1e-4,
+                "x mismatch for rvec {:?}: {} vs {}",
+                rvec,
+                r_quat.x,
+                r_mat.x
+            );
+            assert!(
+                (r_quat.y - r_mat.y).abs() < 1e-4,
+                "y mismatch for rvec {:?}: {} vs {}",
+                rvec,
+                r_quat.y,
+                r_mat.y
+            );
+            assert!(
+                (r_quat.z - r_mat.z).abs() < 1e-4,
+                "z mismatch for rvec {:?}: {} vs {}",
+                rvec,
+                r_quat.z,
+                r_mat.z
+            );
         }
     }
 }
