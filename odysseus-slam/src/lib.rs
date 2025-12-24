@@ -12,6 +12,7 @@ pub mod simulation;
 pub mod trajectory;
 pub mod frame_graph;
 pub mod slam_system;
+pub mod imu;
 // Re-export key types
 pub use math::{SO3, SE3};
 pub use camera::{PinholeCamera, StereoCamera};

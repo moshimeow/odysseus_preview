@@ -71,6 +71,16 @@ impl<T: Real> SO3<T> {
         }
     }
 
+    /// Normalize the quaternion to unit length
+    ///
+    /// This corrects for numerical drift after many quaternion multiplications.
+    /// Should be called periodically in integration loops to prevent NaN.
+    pub fn normalize(&self) -> Self {
+        Self {
+            quat: self.quat.normalize(),
+        }
+    }
+
     /// Convert to rotation matrix
     ///
     /// Returns the equivalent 3x3 rotation matrix.

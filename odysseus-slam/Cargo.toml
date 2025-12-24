@@ -8,6 +8,7 @@ odysseus-solver = { path = "../odysseus-solver", features = ["visualization"] }
 nalgebra = "0.32"
 rand = "0.8"
 rand_chacha = "0.3"
+rand_distr = "0.4"
 rerun = "0.27.2"
 clap = { version = "4.5", features = ["derive"] }
 sprs = "0.11.4"

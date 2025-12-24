@@ -12,6 +12,9 @@ more extensive frontend simulation
 better metrics generally
 
 IMU integration
+ - the vio test trajectory will need analytical velocity
+ - relative motion updates for gba from lba?
+ - external imu simulation module?
 
 Considering adding more traits to Jets so that they're compatible with nalgebra's matrix/vector operations
 
