@@ -292,3 +292,237 @@ impl ContinuousTrajectory for BezierSplineTrajectory {
         Some(omega_cv_na)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn test_bezier_linear() {
+        // Precise linear curve
+        let curve = BezierCurve {
+            keyframes: vec![
+                BezierKeyframe {
+                    time: 0.0,
+                    value: 0.0,
+                    handle_left: (-0.1, 0.0),
+                    handle_right: (1.0 / 3.0, 1.0 / 3.0),
+                },
+                BezierKeyframe {
+                    time: 1.0,
+                    value: 1.0,
+                    handle_left: (2.0 / 3.0, 2.0 / 3.0),
+                    handle_right: (1.1, 1.0),
+                },
+            ],
+        };
+
+        // At t=0.5, value should be 0.5
+        assert_abs_diff_eq!(curve.evaluate(0.5), 0.5, epsilon = 1e-10);
+        // Derivative should be 1.0
+        assert_abs_diff_eq!(curve.derivative(0.5), 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_bezier_smooth_step() {
+        // Curve that starts and ends with zero velocity
+        let curve = BezierCurve {
+            keyframes: vec![
+                BezierKeyframe {
+                    time: 0.0,
+                    value: 0.0,
+                    handle_left: (-0.1, 0.0),
+                    handle_right: (0.5, 0.0), // horizontal handle
+                },
+                BezierKeyframe {
+                    time: 1.0,
+                    value: 1.0,
+                    handle_left: (0.5, 1.0), // horizontal handle
+                    handle_right: (1.1, 1.0),
+                },
+            ],
+        };
+
+        assert_abs_diff_eq!(curve.evaluate(0.0), 0.0, epsilon = 1e-6);
+        assert_abs_diff_eq!(curve.evaluate(1.0), 1.0, epsilon = 1e-6);
+        assert_abs_diff_eq!(curve.evaluate(0.5), 0.5, epsilon = 1e-6);
+
+        // Velocities at ends should be 0
+        assert_abs_diff_eq!(curve.derivative(0.01), 0.0, epsilon = 0.1);
+        // Peak velocity at center should be 1.5 (for this specific setup)
+        // B'(0.5) = 3(0.25)(0) + 6(0.25)(1) + 3(0.25)(0) = 1.5
+        assert_abs_diff_eq!(curve.derivative(0.5), 1.5, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_spline_derivatives() {
+        // Create a moving and rotating spline
+        let mut curves = Vec::new();
+        for i in 0..6 {
+            curves.push(BezierCurve {
+                keyframes: vec![
+                    BezierKeyframe {
+                        time: 0.0,
+                        value: 0.0,
+                        handle_left: (-0.1, 0.0),
+                        handle_right: (0.33, if i < 3 { 1.0 } else { 0.1 }),
+                    },
+                    BezierKeyframe {
+                        time: 1.0,
+                        value: if i < 3 { 1.0 } else { 0.5 },
+                        handle_left: (0.66, if i < 3 { 0.0 } else { 0.4 }),
+                        handle_right: (1.1, 1.0),
+                    },
+                ],
+            });
+        }
+
+        let trajectory = BezierSplineTrajectory {
+            position_curves: [curves[0].clone(), curves[1].clone(), curves[2].clone()],
+            rotation_curves: vec![curves[3].clone(), curves[4].clone(), curves[5].clone()],
+            rotation_mode: RotationMode::EulerXYZ,
+            fps: 30.0,
+            duration: 1.0,
+        };
+
+        let t = 0.5;
+        let v_ana = trajectory.linear_velocity(t);
+
+        // Numerical derivative of position
+        let dt = 1e-6;
+        let p_plus = trajectory.pose(t + dt).translation;
+        let p_minus = trajectory.pose(t - dt).translation;
+        let diff = p_plus - p_minus;
+        let v_num = na::Vector3::new(
+            diff.x / (2.0 * dt),
+            diff.y / (2.0 * dt),
+            diff.z / (2.0 * dt),
+        );
+
+        assert_abs_diff_eq!(v_ana.x, v_num.x, epsilon = 1e-6);
+        assert_abs_diff_eq!(v_ana.y, v_num.y, epsilon = 1e-6);
+        assert_abs_diff_eq!(v_ana.z, v_num.z, epsilon = 1e-6);
+
+        // Angular velocity check (Euler XYZ)
+        if let Some(omega_ana) = trajectory.angular_velocity(t) {
+            // Numerical derivative of rotation
+            let q_plus = trajectory.pose(t + dt).rotation.quat;
+            let q_minus = trajectory.pose(t - dt).rotation.quat;
+            // omega = 2 * (q_dot * q_inv)
+            // Simplified for small dt: 2 * (q(t+dt) - q(t-dt))/(2*dt) * q(t)^inv
+            let q_t = trajectory.pose(t).rotation.quat;
+
+            // q_dot approx
+            let qw_dot = (q_plus.w - q_minus.w) / (2.0 * dt);
+            let qx_dot = (q_plus.x - q_minus.x) / (2.0 * dt);
+            let qy_dot = (q_plus.y - q_minus.y) / (2.0 * dt);
+            let qz_dot = (q_plus.z - q_minus.z) / (2.0 * dt);
+
+            // q_dot * conj(q_t)
+            let res_x = qw_dot * (-q_t.x) + qx_dot * q_t.w + qy_dot * (-q_t.z) - qz_dot * (-q_t.y);
+            let res_y = qw_dot * (-q_t.y) - qx_dot * (-q_t.z) + qy_dot * q_t.w + qz_dot * (-q_t.x);
+            let res_z = qw_dot * (-q_t.z) + qx_dot * (-q_t.y) - qy_dot * (-q_t.x) + qz_dot * q_t.w;
+
+            let omega_num = na::Vector3::new(2.0 * res_x, 2.0 * res_y, 2.0 * res_z);
+
+            assert_abs_diff_eq!(omega_ana.x, omega_num.x, epsilon = 1e-5);
+            assert_abs_diff_eq!(omega_ana.y, omega_num.y, epsilon = 1e-5);
+            assert_abs_diff_eq!(omega_ana.z, omega_num.z, epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_spline_vs_discrete_poses() {
+        let spline_path = "blender_stuff/greeble_room/camera_spline.bin";
+        let poses_path = "blender_stuff/greeble_room/camera_poses.bin";
+
+        // Skip test if files don't exist (e.g. in CI without submodules)
+        if !std::path::Path::new(spline_path).exists() || !std::path::Path::new(poses_path).exists()
+        {
+            println!("skipping test_spline_vs_discrete_poses: data files not found");
+            return;
+        }
+
+        let trajectory = BezierSplineTrajectory::load(spline_path).unwrap();
+
+        // Load discrete poses (manual implementation of the loader)
+        let file = File::open(poses_path).unwrap();
+        let mut reader = std::io::BufReader::new(file);
+
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        let num_frames = u32::from_le_bytes(buf) as usize;
+
+        let mut discrete_poses = Vec::with_capacity(num_frames);
+        for _ in 0..num_frames {
+            let mut matrix = [[0.0f32; 4]; 4];
+            for row in 0..4 {
+                for col in 0..4 {
+                    let mut val_buf = [0u8; 4];
+                    reader.read_exact(&mut val_buf).unwrap();
+                    matrix[row][col] = f32::from_le_bytes(val_buf);
+                }
+            }
+
+            let x_axis = Vec3::new(
+                matrix[0][0] as f64,
+                matrix[1][0] as f64,
+                matrix[2][0] as f64,
+            );
+            let y_axis = Vec3::new(
+                matrix[0][1] as f64,
+                matrix[1][1] as f64,
+                matrix[2][1] as f64,
+            );
+            let z_axis = Vec3::new(
+                matrix[0][2] as f64,
+                matrix[1][2] as f64,
+                matrix[2][2] as f64,
+            );
+            let rotation_matrix = odysseus_solver::math3d::Mat3::from_cols(x_axis, y_axis, z_axis);
+            let rotation = SO3::from_matrix(rotation_matrix);
+            let translation = Vec3::new(
+                matrix[0][3] as f64,
+                matrix[1][3] as f64,
+                matrix[2][3] as f64,
+            );
+            discrete_poses.push(SE3 {
+                rotation,
+                translation,
+            });
+        }
+
+        // Compare spline samples to discrete poses
+        // The discrete poses were exported at 30 FPS starting at frame 1 (t = 1/30)
+        for i in 0..num_frames {
+            let t = (i + 1) as f64 / trajectory.fps;
+            let spline_pose = trajectory.pose(t);
+            let discrete_pose = discrete_poses[i];
+
+            // Translation should be quite close (within 1mm)
+            assert_abs_diff_eq!(
+                spline_pose.translation.x,
+                discrete_pose.translation.x,
+                epsilon = 1e-3
+            );
+            assert_abs_diff_eq!(
+                spline_pose.translation.y,
+                discrete_pose.translation.y,
+                epsilon = 1e-3
+            );
+            assert_abs_diff_eq!(
+                spline_pose.translation.z,
+                discrete_pose.translation.z,
+                epsilon = 1e-3
+            );
+
+            // Rotation should also be close
+            // We compare the quaternions (standardizing the sign)
+            let q1 = spline_pose.rotation.quat;
+            let q2 = discrete_pose.rotation.quat;
+            let dot = q1.w * q2.w + q1.x * q2.x + q1.y * q2.y + q1.z * q2.z;
+            assert!(dot.abs() > 0.999);
+        }
+    }
+}
