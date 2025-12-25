@@ -1,6 +1,7 @@
-//! Visual-Inertial Odometry (VIO) Demo
+//! Incremental Visual-Inertial Odometry (VIO) Demo
 //!
-//! Demonstrates tightly-coupled VIO optimization combining:
+//! Demonstrates incremental tightly-coupled VIO optimization with:
+//! - Sliding window bundle adjustment with IMU constraints
 //! - Visual reprojection residuals from stereo observations
 //! - IMU preintegration residuals from high-rate IMU data
 //! - Bias random walk constraints
@@ -16,16 +17,16 @@ use odysseus_slam::{
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     geometry::StereoObservation,
     imu::{simulator::ImuNoiseParams, ImuFrameState, ImuSimulator, PreintegratedImu},
-    math::SE3,
     optimization::vio::{run_vio_bundle_adjustment, VioConfig},
-    simulation::{self, generate_stereo_observations},
+    simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     spline::BezierSplineTrajectory,
     trajectory::ContinuousTrajectory,
+    utils::{get_peak_rss_mb, get_rss_mb, load_point_cloud},
+    visualization::{visualize_ground_truth, visualize_stereo_camera},
     WorldState,
 };
 use rerun as rr;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use std::collections::HashSet;
 
 /// VIO Demo with synthetic data
 #[derive(Parser, Debug)]
@@ -41,6 +42,7 @@ const IMU_RATE: f64 = 200.0; // Hz
 const CAMERA_RATE: f64 = 30.0; // Hz
 const DURATION: f64 = 5.0; // Seconds
 const STEREO_BASELINE: f64 = 0.1;
+const WINDOW_SIZE: usize = 2; // VIO window size
 
 // Noise parameters
 const ACCEL_NOISE: f64 = 0.01; // m/s^2 / sqrt(Hz)
@@ -50,35 +52,42 @@ fn main() {
     let args = Args::parse();
     unsafe {
         let _ = backtrace_on_stack_overflow::enable(|| {
-            if let Err(e) = run_demo(args.noise) {
+            if let Err(e) = run_vio(args.noise) {
                 eprintln!("Error: {}", e);
             }
         });
     }
 }
 
-fn run_demo(pixel_noise: f64) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🎯 Visual-Inertial Odometry (VIO) Demo");
-    println!("   Observation Noise: {:.2} pixels", pixel_noise);
-    println!("======================================\n");
+fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🎯 Incremental Visual-Inertial Odometry (VIO) Demo");
+    println!("   Observation Noise: {:.2} pixels", noise_stddev);
+    println!("   Window Size: {} frames", WINDOW_SIZE);
+    println!("=============================================\n");
+    println!("📊 Memory at startup: {:.1} MB", get_rss_mb());
 
     // Initialize Rerun
     let rec = rr::RecordingStreamBuilder::new("vio_demo").spawn()?;
-    rec.log_static("world", &rr::ViewCoordinates::RDF())?; // Right, Down, Forward (OpenCV)
+    rec.log_static("world", &rr::ViewCoordinates::RDF())?;
 
-    // 1. Load Spline and generating trajectory
+    // Stereo camera setup
+    let focal_length = 500.0;
+    let image_width = 640.0;
+    let image_height = 480.0;
+    let stereo_camera =
+        StereoCamera::simple(focal_length, image_width, image_height, STEREO_BASELINE);
+
+    println!("📷 Stereo Camera:");
+    println!("  Focal length: {} px", focal_length);
+    println!("  Baseline: {} m\n", STEREO_BASELINE);
+
+    // Load ground truth spline trajectory
     println!("📈 Loading Bezier spline from Blender export...");
     let spline_path = "blender_stuff/greeble_room/camera_spline.bin";
     let trajectory = BezierSplineTrajectory::load(spline_path)?;
     println!("   Spline loaded successfully.\n");
 
-    // 2. Setup Camera
-    let focal_length = 500.0;
-    let width = 640.0;
-    let height = 480.0;
-    let stereo_camera = StereoCamera::simple(focal_length, width, height, STEREO_BASELINE);
-
-    // 3. Generate Ground Truth and IMU data
+    // Sample ground truth IMU measurements from spline trajectory
     println!("🧪 Simulating IMU data at {} Hz...", IMU_RATE);
     let simulator = ImuSimulator::new(
         ImuNoiseParams {
@@ -90,14 +99,10 @@ fn run_demo(pixel_noise: f64) -> Result<(), Box<dyn std::error::Error>> {
         IMU_RATE,
     );
 
-    let imu_measurements = simulator.generate_from_continuous_trajectory(
-        &trajectory,
-        DURATION,
-        42, // seed
-    );
+    let imu_measurements = simulator.generate_from_continuous_trajectory(&trajectory, DURATION, 42);
     println!("   Generated {} IMU measurements.", imu_measurements.len());
 
-    // 4. Generate Camera Frames and Observations
+    // Sample ground truth camera poses from spline trajectory
     println!("📷 Sampling camera frames at {} Hz...", CAMERA_RATE);
     let mut gt_poses = Vec::new();
     let mut gt_velocities = Vec::new();
@@ -121,176 +126,318 @@ fn run_demo(pixel_noise: f64) -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| odysseus_solver::math3d::Vec3::new(p[0], p[1], p[2]))
         .collect();
 
-    let observations_raw =
-        generate_stereo_observations(&gt_points, &gt_poses, &stereo_camera, width, height);
-
-    // Add pixel noise
-    let observations =
-        simulation::add_noise_to_stereo_observations(&observations_raw, pixel_noise, 42);
+    // Generate ALL observations for all frames
+    println!("📹 Generating observations for all frames...");
+    let perfect_observations = generate_stereo_observations(
+        &gt_points,
+        &gt_poses,
+        &stereo_camera,
+        image_width,
+        image_height,
+    );
+    let observations = if noise_stddev > 0.0 {
+        println!("  Adding noise with stddev = {} pixels", noise_stddev);
+        add_noise_to_stereo_observations(&perfect_observations, noise_stddev, 123)
+    } else {
+        println!("  Using perfect observations (no noise)");
+        perfect_observations
+    };
 
     let mut frame_observations: Vec<Vec<StereoObservation>> = vec![Vec::new(); n_frames];
     for obs in observations {
         frame_observations[obs.camera_id].push(obs);
     }
 
-    // 5. Setup SLAM State
+    println!(
+        "  {} total stereo observations\n",
+        frame_observations.iter().map(|f| f.len()).sum::<usize>()
+    );
+
+    // Visualize ground truth
+    visualize_ground_truth(&rec, &gt_points, &gt_poses, &stereo_camera)?;
+
+    // Initialize SLAM state
     println!("🏗️  Initializing VIO state...");
     let mut world = WorldState::new();
     let mut frame_graph = FrameGraph::new();
-    let mut imu_states = Vec::new();
+    let mut imu_states: Vec<ImuFrameState> = Vec::new();
+    let mut preintegrations: Vec<PreintegratedImu> = Vec::new();
 
-    // Perturb initial state slightly
+    // Initialize from first frame (fixed)
+    println!("🚀 Initializing from frame 0...");
+    world.add_pose(gt_poses[0]);
+    imu_states.push(ImuFrameState::with_velocity(gt_velocities[0]));
+    frame_graph.add_frame(FrameRole::Keyframe, OptimizationState::Fixed);
+
+    // Triangulate initial points from first frame observations
+    for obs in &frame_observations[0] {
+        world.triangulate_and_add_point(obs, &stereo_camera, 0);
+    }
+    println!(
+        "  Initialized {} points from triangulation\n",
+        world.num_points()
+    );
+
+    // Visualize initial state
+    visualize_vio_estimate(
+        &rec,
+        0,
+        &world,
+        &frame_graph,
+        &imu_states,
+        &gt_velocities,
+        &stereo_camera,
+    )?;
+
+    println!(
+        "📊 Memory before frame processing: {:.1} MB\n",
+        get_rss_mb()
+    );
+
+    // Tracking variables
+    let mut total_vio_time = 0.0;
+    let gravity_vec = [0.0, 9.81, 0.0];
+    let config = VioConfig::default();
+    let fixed_point_ids: HashSet<usize> = HashSet::new();
+
+    // Perturb state generator (to simulate tracking error)
     use rand::prelude::*;
     let mut rng = StdRng::seed_from_u64(1234);
 
-    for i in 0..n_frames {
-        let mut pose = gt_poses[i];
-        let mut vel = gt_velocities[i];
+    // MAIN LOOP - Process frames incrementally
+    for frame_idx in 1..n_frames {
+        let frame_start = std::time::Instant::now();
 
-        if i > 0 {
-            // Add some drift/noise to initial guess (simulating tracking error)
-            pose.translation.x += rng.gen_range(-0.1..0.1);
-            pose.translation.y += rng.gen_range(-0.1..0.1);
-            pose.translation.z += rng.gen_range(-0.1..0.1);
-
-            vel.x += rng.gen_range(-0.05..0.05);
-            vel.y += rng.gen_range(-0.05..0.05);
-            vel.z += rng.gen_range(-0.05..0.05);
+        // Memory checkpoint every 10 frames
+        if frame_idx % 10 == 0 {
+            println!(
+                "📊 Memory at frame {}: {:.1} MB (peak: {:.1} MB)",
+                frame_idx,
+                get_rss_mb(),
+                get_peak_rss_mb()
+            );
         }
 
-        world.add_pose(pose);
-        imu_states.push(ImuFrameState::with_velocity(vel));
+        // Get initial guess from previous pose (with simulated tracking error)
+        let mut init_pose = world.get_pose(frame_idx - 1).unwrap();
+        let mut init_vel = imu_states[frame_idx - 1].velocity;
 
-        let state = if i == 0 {
-            OptimizationState::Fixed
-        } else {
-            OptimizationState::Optimized
-        };
-        frame_graph.add_frame(FrameRole::Keyframe, state);
-    }
+        // Add some drift/noise to initial guess
+        init_pose.translation.x += rng.gen_range(-0.05..0.05);
+        init_pose.translation.y += rng.gen_range(-0.05..0.05);
+        init_pose.translation.z += rng.gen_range(-0.05..0.05);
+        init_vel.x += rng.gen_range(-0.02..0.02);
+        init_vel.y += rng.gen_range(-0.02..0.02);
+        init_vel.z += rng.gen_range(-0.02..0.02);
 
-    // Initialize all observed points
-    for (i, frame_obs) in frame_observations.iter().enumerate() {
-        for obs in frame_obs {
-            if world.get_point(obs.point_id).is_none() {
-                if let Some(pos) = gt_points.get(obs.point_id) {
-                    world.add_point_with_id(*pos, i, obs.point_id);
-                }
-            }
-        }
-    }
+        // Add frame to world
+        world.add_pose(init_pose);
+        imu_states.push(ImuFrameState::with_velocity(init_vel));
+        frame_graph.add_frame(FrameRole::Keyframe, OptimizationState::Optimized);
 
-    // 6. Preintegrate IMU measurements between frames
-    println!("🔄 Preintegrating IMU data...");
-    let mut preintegrations = Vec::new();
-    for i in 0..n_frames - 1 {
-        let t_start = timestamps[i];
-        let t_end = timestamps[i + 1];
-
+        // Preintegrate IMU measurements for this frame
+        let t_start = timestamps[frame_idx - 1];
+        let t_end = timestamps[frame_idx];
         let mut preint = PreintegratedImu::new(Vector3::zeros(), Vector3::zeros());
-        let frame_measurements: Vec<_> = imu_measurements
+        let frame_imu: Vec<_> = imu_measurements
             .iter()
             .filter(|m| m.timestamp >= t_start && m.timestamp < t_end)
             .cloned()
             .collect();
-
-        preint.integrate_measurements(&frame_measurements, GYRO_NOISE, ACCEL_NOISE);
+        preint.integrate_measurements(&frame_imu, GYRO_NOISE, ACCEL_NOISE);
         preintegrations.push(preint);
+
+        // Triangulate new points
+        let current_obs = &frame_observations[frame_idx];
+        let mut new_points = 0;
+        for obs in current_obs {
+            if world.get_point(obs.point_id).is_none() {
+                world.triangulate_and_add_point(obs, &stereo_camera, frame_idx);
+                new_points += 1;
+            }
+        }
+
+        // Manage sliding window
+        let mut optimized_count = frame_graph
+            .states
+            .iter()
+            .filter(|s| s.state == OptimizationState::Optimized)
+            .count();
+
+        while optimized_count > WINDOW_SIZE {
+            // Find oldest optimized frame and mark as inactive
+            for i in 0..frame_graph.len() {
+                if frame_graph.states[i].state == OptimizationState::Optimized {
+                    frame_graph.set_state(i, OptimizationState::Inactive);
+                    break;
+                }
+            }
+            optimized_count -= 1;
+        }
+
+        // Run VIO optimization on current window
+        let result = run_vio_bundle_adjustment(
+            &stereo_camera,
+            &frame_graph,
+            &mut world,
+            &frame_observations,
+            &mut imu_states,
+            &preintegrations,
+            gravity_vec,
+            &fixed_point_ids,
+            &config,
+        );
+
+        let vio_time = result.solve_time_ms;
+        total_vio_time += vio_time;
+
+        // Get optimized pose for error checking
+        let optimized_pose = world.frames[frame_idx].world_pose();
+        let pos_error = (optimized_pose.translation - gt_poses[frame_idx].translation).norm();
+
+        // Compute rotation error
+        let q_err = gt_poses[frame_idx].rotation.inverse().quat * optimized_pose.rotation.quat;
+        let angle_rad = 2.0 * q_err.w.abs().acos();
+        let angle_deg = angle_rad.to_degrees();
+
+        // Warn if error exceeds thresholds
+        const MAX_POSITION_ERROR: f64 = 0.5;
+        const MAX_ROTATION_ERROR: f64 = 10.0;
+        if pos_error > MAX_POSITION_ERROR || angle_deg > MAX_ROTATION_ERROR {
+            eprintln!(
+                "\n❌ ERROR: Pose error exceeded thresholds at frame {}!",
+                frame_idx
+            );
+            eprintln!(
+                "  Position error: {:.4} m (max: {:.4} m)",
+                pos_error, MAX_POSITION_ERROR
+            );
+            eprintln!(
+                "  Rotation error: {:.4} deg (max: {:.4} deg)",
+                angle_deg, MAX_ROTATION_ERROR
+            );
+        }
+
+        // Visualize current state
+        visualize_vio_estimate(
+            &rec,
+            frame_idx,
+            &world,
+            &frame_graph,
+            &imu_states,
+            &gt_velocities,
+            &stereo_camera,
+        )?;
+
+        let frame_duration = frame_start.elapsed();
+        let n_optimized = frame_graph
+            .states
+            .iter()
+            .filter(|s| s.state == OptimizationState::Optimized)
+            .count();
+        let n_fixed = frame_graph
+            .states
+            .iter()
+            .filter(|s| s.state == OptimizationState::Fixed)
+            .count();
+
+        println!(
+            "Frame {}: {} opt, {} fixed, {} obs, {} new pts, VIO: {:.2} ms, Total: {:.2} ms",
+            frame_idx,
+            n_optimized,
+            n_fixed,
+            current_obs.len(),
+            new_points,
+            vio_time,
+            frame_duration.as_secs_f64() * 1000.0
+        );
     }
 
-    // 7. Run VIO Optimization
-    println!("🚀 Running tightly-coupled VIO Optimization...");
-    let gravity_vec = [0.0, 9.81, 0.0];
-
-    let config = VioConfig::default();
-
-    let result = run_vio_bundle_adjustment(
-        &stereo_camera,
-        &frame_graph,
-        &mut world,
-        &frame_observations,
-        &mut imu_states,
-        &preintegrations,
-        gravity_vec,
-        &config,
-    );
-
+    println!("\n✅ Processed {} frames", n_frames);
+    println!("   Final map: {} points", world.num_points());
     println!(
-        "\n✅ Optimization finished in {} iterations ({:.2} ms).",
-        result.iterations, result.solve_time_ms
+        "\n📊 Final memory: {:.1} MB, Peak: {:.1} MB",
+        get_rss_mb(),
+        get_peak_rss_mb()
     );
-    println!("   Final error: {:.4}", result.final_error);
-
-    // 8. Visualization
-    println!("📺 Visualizing in Rerun...");
-    visualize_vio(
-        &rec,
-        &world,
-        &gt_poses,
-        &gt_points,
-        &imu_states,
-        &gt_velocities,
-    )?;
+    println!(
+        "   Average VIO time: {:.2} ms",
+        total_vio_time / (n_frames - 1) as f64
+    );
+    println!("\n📺 Open Rerun to see the SLAM visualization!");
 
     Ok(())
 }
 
-fn visualize_vio(
+fn visualize_vio_estimate(
     rec: &rr::RecordingStream,
+    frame_idx: usize,
     world: &WorldState,
-    gt_poses: &[SE3<f64>],
-    _gt_points: &[odysseus_solver::math3d::Vec3<f64>],
+    frame_graph: &FrameGraph,
     imu_states: &[ImuFrameState],
     gt_velocities: &[Vector3<f64>],
+    stereo_camera: &StereoCamera<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Log Ground Truth Trajectory
-    let gt_path: Vec<[f32; 3]> = gt_poses
-        .iter()
-        .map(|p| {
-            [
-                p.translation.x as f32,
-                p.translation.y as f32,
-                p.translation.z as f32,
-            ]
-        })
-        .collect();
-    rec.log(
-        "world/gt/trajectory",
-        &rr::LineStrips3D::new([gt_path]).with_colors([[150, 150, 150]]),
-    )?;
+    rec.set_time_sequence("trajectory", frame_idx as i64);
 
-    // Log Estimated Trajectory
-    let est_path: Vec<[f32; 3]> = world
+    // Visualize cameras
+    for (i, frame) in world.frames.iter().enumerate() {
+        if i > frame_idx {
+            continue;
+        }
+        let state = &frame_graph.states[i];
+        let color = match state.state {
+            OptimizationState::Fixed => [255, 100, 100, 255],
+            OptimizationState::Optimized => [100, 200, 255, 255],
+            OptimizationState::Inactive => [50, 80, 120, 255],
+            _ => [100, 100, 100, 255],
+        };
+
+        visualize_stereo_camera(
+            rec,
+            &format!("world/estimate/cameras/cam_{:03}", i),
+            &frame.world_pose(),
+            stereo_camera,
+            color,
+        )?;
+    }
+
+    // Estimated trajectory
+    let trajectory: Vec<[f32; 3]> = world
         .frames
         .iter()
-        .map(|f| {
-            let p = f.world_pose().translation;
-            [p.x as f32, p.y as f32, p.z as f32]
+        .take(frame_idx + 1)
+        .map(|frame| {
+            let t = frame.world_pose().translation;
+            [t.x as f32, t.y as f32, t.z as f32]
         })
         .collect();
+
     rec.log(
-        "world/est/trajectory",
-        &rr::LineStrips3D::new([est_path]).with_colors([[50, 150, 255]]),
+        "world/estimate/trajectory",
+        &rr::LineStrips3D::new([trajectory])
+            .with_colors([[50, 150, 255]])
+            .with_radii([0.02]),
     )?;
 
-    // Log Points
-    let points: Vec<[f32; 3]> = world
+    // Estimated points
+    let point_positions: Vec<[f32; 3]> = world
         .get_all_points()
         .iter()
         .map(|(_, p)| [p.x as f32, p.y as f32, p.z as f32])
         .collect();
+
     rec.log(
-        "world/est/points",
-        &rr::Points3D::new(points)
-            .with_radii([0.02])
-            .with_colors([[100, 200, 255]]),
+        "world/estimate/points",
+        &rr::Points3D::new(point_positions)
+            .with_colors([[50, 150, 255]])
+            .with_radii([0.04]),
     )?;
 
-    // Log Velocity Comparison
-    for i in 0..imu_states.len() {
-        rec.set_time_sequence("frame", i as i64);
-        let est_vel = imu_states[i].velocity;
-        let gt_vel = gt_velocities[i];
+    // Log velocity comparison
+    if frame_idx < imu_states.len() && frame_idx < gt_velocities.len() {
+        let est_vel = imu_states[frame_idx].velocity;
+        let gt_vel = gt_velocities[frame_idx];
 
         rec.log("plots/velocity/x/est", &rr::Scalars::new([est_vel.x]))?;
         rec.log("plots/velocity/x/gt", &rr::Scalars::new([gt_vel.x]))?;
@@ -303,25 +450,4 @@ fn visualize_vio(
     }
 
     Ok(())
-}
-
-fn load_point_cloud(path: &str) -> Result<Vec<[f64; 3]>, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf)?;
-    let num_vertices = u32::from_le_bytes(buf) as usize;
-
-    let mut vertices = Vec::with_capacity(num_vertices);
-    for _ in 0..num_vertices {
-        let mut v_buf = [0u8; 4];
-        let mut coords = [0.0f64; 3];
-        for i in 0..3 {
-            reader.read_exact(&mut v_buf)?;
-            coords[i] = f32::from_le_bytes(v_buf) as f64;
-        }
-        vertices.push(coords);
-    }
-    Ok(vertices)
 }

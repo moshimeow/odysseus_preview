@@ -142,7 +142,7 @@ pub fn run_imu_optimization(
     }
 
     // Create solver
-    let mut solver = SparseLevenbergMarquardt::new(n_residuals, n_params, &entries)
+    let mut solver = SparseLevenbergMarquardt::<f64>::new(n_residuals, n_params, &entries)
         .with_tolerance(1e-8)
         .with_max_iterations(50)
         .with_verbose(false);

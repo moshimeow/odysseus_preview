@@ -12,9 +12,10 @@ more extensive frontend simulation
 better metrics generally
 
 IMU integration
- - the vio test trajectory will need analytical velocity
  - relative motion updates for gba from lba?
  - external imu simulation module?
+
+IMU rotation calibration (on a real VR headset the IMU is not in a known orientation)
 
 Considering adding more traits to Jets so that they're compatible with nalgebra's matrix/vector operations
 
@@ -29,6 +30,8 @@ sparse prior
 optical flow first step pose estimation
 
 frame graph refactor
+
+jet version of jacobian calculation in imu preintegration
 
 memory usage refactor
 

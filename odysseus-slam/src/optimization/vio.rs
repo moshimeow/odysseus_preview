@@ -4,18 +4,30 @@ use crate::geometry::StereoObservation;
 use crate::imu::preintegration::PreintegratedImu;
 use crate::imu::residuals::{bias_residual, imu_preintegration_residual};
 use crate::imu::types::ImuFrameState;
+use crate::optimization::select_active_points;
 use crate::world_state::WorldState;
 use nalgebra::{DVector, Vector3};
 use odysseus_solver::math3d::Vec3;
 use odysseus_solver::{Jet, SparseLevenbergMarquardt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use super::apply_huber_loss;
 
 /// Configuration for VIO bundle adjustment
 #[derive(Debug, Clone)]
 pub struct VioConfig {
+    /// Maximum solver iterations
     pub max_iterations: usize,
+    /// Convergence tolerance
     pub tolerance: f64,
+    /// Huber loss threshold (pixels)
     pub huber_delta: f64,
+    /// Maximum number of map points to include
+    pub max_active_points: usize,
+    /// Gyroscope random walk noise (rad/s/sqrt(Hz))
+    pub gyro_sigma: f64,
+    /// Accelerometer random walk noise (m/s^2/sqrt(Hz))
+    pub accel_sigma: f64,
 }
 
 impl Default for VioConfig {
@@ -24,6 +36,9 @@ impl Default for VioConfig {
             max_iterations: 10,
             tolerance: 1e-6,
             huber_delta: 1.0,
+            max_active_points: 600,
+            gyro_sigma: 0.001,
+            accel_sigma: 0.01,
         }
     }
 }
@@ -36,6 +51,8 @@ pub struct VioResult {
 }
 
 /// Run tightly-coupled VIO bundle adjustment
+///
+/// Points in `fixed_point_ids` contribute to residuals but are not optimized.
 pub fn run_vio_bundle_adjustment(
     stereo_camera: &StereoCamera<f64>,
     frame_graph: &FrameGraph,
@@ -44,6 +61,7 @@ pub fn run_vio_bundle_adjustment(
     imu_states: &mut Vec<ImuFrameState>,
     preintegrations: &[PreintegratedImu],
     gravity: [f64; 3],
+    fixed_point_ids: &HashSet<usize>,
     config: &VioConfig,
 ) -> VioResult {
     let n_frames = world.frames.len();
@@ -51,7 +69,7 @@ pub fn run_vio_bundle_adjustment(
     // Preintegrations should be between consecutive frames
     assert_eq!(preintegrations.len(), n_frames - 1);
 
-    // 1. Identify active poses and points
+    // ========== 1. Collect observations and select active points ==========
     let active_frame_indices: Vec<_> = frame_graph
         .states
         .iter()
@@ -60,14 +78,36 @@ pub fn run_vio_bundle_adjustment(
         .map(|(idx, _)| idx)
         .collect();
 
-    let mut active_point_ids = std::collections::HashSet::new();
-    for &frame_idx in &active_frame_indices {
-        for obs in &frame_observations[frame_idx] {
-            if world.get_point(obs.point_id).is_some() {
-                active_point_ids.insert(obs.point_id);
-            }
-        }
-    }
+    // Collect all observations from active frames
+    let all_obs: Vec<_> = active_frame_indices
+        .iter()
+        .flat_map(|&frame_idx| {
+            frame_observations[frame_idx]
+                .iter()
+                .filter(|obs| world.get_point(obs.point_id).is_some())
+                .copied()
+        })
+        .collect();
+
+    // Use shared point selection logic
+    let (optimized_point_ids, all_point_ids) = select_active_points(
+        &all_obs,
+        |obs| obs.point_id,
+        |obs| obs.camera_id,
+        |frame_id| {
+            frame_graph
+                .states
+                .get(frame_id)
+                .map(|s| s.is_optimized())
+                .unwrap_or(false)
+        },
+        fixed_point_ids,
+        config.max_active_points,
+    );
+
+    let active_points_set: HashSet<_> = all_point_ids.into_iter().collect();
+
+    // ========== 2. Build parameter mappings ==========
 
     let mut pose_to_param_idx = HashMap::new();
     let mut point_to_param_idx = HashMap::new();
@@ -78,9 +118,8 @@ pub fn run_vio_bundle_adjustment(
         offset += 15; // [rot_delta(3), trans(3), vel(3), bg(3), ba(3)]
     }
 
-    let mut active_points_vec: Vec<_> = active_point_ids.into_iter().collect();
-    active_points_vec.sort();
-    for &id in &active_points_vec {
+    // Only optimized points get parameter indices (fixed points use world state directly)
+    for &id in &optimized_point_ids {
         point_to_param_idx.insert(id, offset);
         offset += 3;
     }
@@ -95,7 +134,7 @@ pub fn run_vio_bundle_adjustment(
         };
     }
 
-    // 2. Map residuals and build sparsity pattern
+    // ========== 3. Build sparsity entries ==========
     let mut visual_obs_filtered = Vec::new();
     let mut entries = Vec::new();
 
@@ -103,7 +142,9 @@ pub fn run_vio_bundle_adjustment(
     for frame_idx in 0..n_frames {
         let pose_opt = pose_to_param_idx.get(&frame_idx);
         for obs in &frame_observations[frame_idx] {
-            if world.get_point(obs.point_id).is_none() {
+            // Skip if point doesn't exist or isn't in our active set
+            if world.get_point(obs.point_id).is_none() || !active_points_set.contains(&obs.point_id)
+            {
                 continue;
             }
             let point_opt = point_to_param_idx.get(&obs.point_id);
@@ -175,7 +216,8 @@ pub fn run_vio_bundle_adjustment(
     entries.sort();
     entries.dedup();
 
-    // 3. Collect initial parameters
+    // ========== 4. Pack parameters ==========
+
     let mut initial_params = DVector::zeros(n_params);
     for (&idx, &p_idx) in &pose_to_param_idx {
         let pose = &world.frames[idx].pose;
@@ -196,7 +238,7 @@ pub fn run_vio_bundle_adjustment(
         initial_params[p_idx + 13] = imu.accel_bias.y;
         initial_params[p_idx + 14] = imu.accel_bias.z;
     }
-    for &id in &active_points_vec {
+    for &id in &optimized_point_ids {
         let p_idx = point_to_param_idx[&id];
         let pt = world.get_point(id).unwrap();
         initial_params[p_idx + 0] = pt.x;
@@ -204,9 +246,10 @@ pub fn run_vio_bundle_adjustment(
         initial_params[p_idx + 2] = pt.z;
     }
 
-    // 4. Solve
+    // ========== 5. Solve ==========
+
     let start_time = std::time::Instant::now();
-    let mut solver = SparseLevenbergMarquardt::new(n_residuals, n_params, &entries)
+    let mut solver = SparseLevenbergMarquardt::<f64>::new(n_residuals, n_params, &entries)
         .with_tolerance(config.tolerance)
         .with_max_iterations(config.max_iterations);
 
@@ -244,7 +287,8 @@ pub fn run_vio_bundle_adjustment(
     );
     let solve_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
-    // 5. Update state
+    // ========== 6. Unpack results ==========
+
     for (&idx, &p_idx) in &pose_to_param_idx {
         let rot_delta = Vec3::new(
             optimized[p_idx + 0],
@@ -274,7 +318,7 @@ pub fn run_vio_bundle_adjustment(
             optimized[p_idx + 14],
         );
     }
-    for &id in &active_points_vec {
+    for &id in &optimized_point_ids {
         let p_idx = point_to_param_idx[&id];
         world.update_point(
             id,
@@ -558,15 +602,20 @@ fn compute_vio_cost(
         };
 
         let dt = preintegrations[i].delta_time;
-        // Constants for noise (consumer grade)
-        let gyro_sigma = 0.001;
-        let accel_sigma = 0.01;
 
-        let res = bias_residual::<f64>(&bg_i, &ba_i, &bg_j, &ba_j, dt, gyro_sigma, accel_sigma);
+        let res = bias_residual::<f64>(
+            &bg_i,
+            &ba_i,
+            &bg_j,
+            &ba_j,
+            dt,
+            config.gyro_sigma,
+            config.accel_sigma,
+        );
 
         let dt_sqrt = dt.sqrt();
-        let gw = 1.0 / (gyro_sigma * dt_sqrt);
-        let aw = 1.0 / (accel_sigma * dt_sqrt);
+        let gw = 1.0 / (config.gyro_sigma * dt_sqrt);
+        let aw = 1.0 / (config.accel_sigma * dt_sqrt);
 
         for r_idx in 0..6 {
             residuals[res_idx + r_idx] = res[r_idx];
@@ -585,18 +634,6 @@ fn compute_vio_cost(
                     jac_cursor += 1;
                 }
             }
-        }
-    }
-}
-
-#[inline]
-fn apply_huber_loss(huber_delta: f64, residual: &mut f64, jacobian_row: &mut [f64]) {
-    let abs_r = residual.abs();
-    if abs_r > huber_delta {
-        let weight = (huber_delta / abs_r).sqrt();
-        *residual *= weight;
-        for j in jacobian_row.iter_mut() {
-            *j *= weight;
         }
     }
 }

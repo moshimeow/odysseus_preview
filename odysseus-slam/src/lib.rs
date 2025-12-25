@@ -1,4 +1,4 @@
-#![recursion_limit = "1024"]
+#![recursion_limit = "2048"]
 //! Odysseus SLAM: A compile-time SLAM backend using automatic differentiation
 //!
 //! This library implements bundle adjustment for visual SLAM using const generics
@@ -14,6 +14,8 @@ pub mod simulation;
 pub mod slam_system;
 pub mod spline;
 pub mod trajectory;
+pub mod utils;
+pub mod visualization;
 pub mod world_state;
 // Re-export key types
 pub use camera::{PinholeCamera, StereoCamera};
