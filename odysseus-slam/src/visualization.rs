@@ -184,6 +184,9 @@ pub fn visualize_ground_truth(
 }
 
 /// Visualize estimated trajectory and map on the "trajectory" timeline
+///
+/// `prev_frame_graph` is the state before the current update, used to detect
+/// which cameras changed state and need re-rendering. Pass `None` on first call.
 pub fn visualize_estimate(
     rec: &rr::RecordingStream,
     frame_idx: usize,
@@ -191,7 +194,7 @@ pub fn visualize_estimate(
     frame_graph: &FrameGraph,
     gt_points: &[Point3D<f64>],
     stereo_camera: &StereoCamera<f64>,
-    states_before: &[(OptimizationState, FrameRole)],
+    prev_frame_graph: Option<&FrameGraph>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Set trajectory timeline
     rec.set_time_sequence("trajectory", frame_idx as i64);
@@ -204,18 +207,24 @@ pub fn visualize_estimate(
         let path_prefix = camera_path_prefix(new_state, new_role);
 
         // Determine if we need to update visualization (state changed or new frame)
-        let should_update = if idx < states_before.len() {
-            if (states_before[idx].0, states_before[idx].1) != (new_state, new_role) {
-                // Delete from old path
-                let old_prefix = camera_path_prefix(states_before[idx].0, states_before[idx].1);
-                let old_path = format!("{}/cam_{:03}", old_prefix, idx);
-                rec.log(old_path.as_str(), &rr::Clear::recursive())?;
-                true
+        let should_update = if let Some(prev) = prev_frame_graph {
+            if idx < prev.states.len() {
+                let old_state = prev.states[idx].state;
+                let old_role = prev.states[idx].role;
+                if (old_state, old_role) != (new_state, new_role) {
+                    // Delete from old path
+                    let old_prefix = camera_path_prefix(old_state, old_role);
+                    let old_path = format!("{}/cam_{:03}", old_prefix, idx);
+                    rec.log(old_path.as_str(), &rr::Clear::recursive())?;
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                true // New frame
             }
         } else {
-            true
+            true // No previous state, update all
         };
 
         if should_update {
@@ -301,7 +310,7 @@ pub fn visualize_gba_update(
     gba_frame_graph: &FrameGraph,
     gt_points: &[Point3D<f64>],
     stereo_camera: &StereoCamera<f64>,
-    gba_states_before: &[(OptimizationState, FrameRole)],
+    prev_gba_frame_graph: Option<&FrameGraph>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use a separate timeline for GBA updates
     rec.set_time_sequence("gba_updates", gba_update_count as i64);
@@ -345,19 +354,24 @@ pub fn visualize_gba_update(
         let path_prefix = gba_camera_path_prefix(new_state, new_role);
 
         // Determine if we need to update visualization (state changed or new frame)
-        let should_update = if idx < gba_states_before.len() {
-            if (gba_states_before[idx].0, gba_states_before[idx].1) != (new_state, new_role) {
-                // Delete from old path
-                let old_prefix =
-                    gba_camera_path_prefix(gba_states_before[idx].0, gba_states_before[idx].1);
-                let old_path = format!("{}/cam_{:03}", old_prefix, idx);
-                rec.log(old_path.as_str(), &rr::Clear::recursive())?;
-                true
+        let should_update = if let Some(prev) = prev_gba_frame_graph {
+            if idx < prev.states.len() {
+                let old_state = prev.states[idx].state;
+                let old_role = prev.states[idx].role;
+                if (old_state, old_role) != (new_state, new_role) {
+                    // Delete from old path
+                    let old_prefix = gba_camera_path_prefix(old_state, old_role);
+                    let old_path = format!("{}/cam_{:03}", old_prefix, idx);
+                    rec.log(old_path.as_str(), &rr::Clear::recursive())?;
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                true // New frame
             }
         } else {
-            true // New frame, always update
+            true // No previous state, update all
         };
 
         if should_update {
