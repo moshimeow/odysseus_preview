@@ -12,12 +12,14 @@ use odysseus_slam::{
     camera::StereoCamera,
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     geometry::StereoObservation,
+    math::SE3,
     optimization::{run_bundle_adjustment, BundleAdjustmentConfig, MarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
     SlamSystem, WorldState,
 };
+use odysseus_solver::math3d::Vec3;
 use rerun as rr;
 use std::sync::Arc;
 
@@ -35,6 +37,34 @@ const WINDOW_SIZE: usize = 5; // LBA window: last N frames
 
 // Physical constants (meters)
 const STEREO_BASELINE: f64 = 0.1;
+
+// Keyframe selection: require baseline >= BASELINE_RATIO * median_depth
+// This ensures good triangulation geometry that scales with scene depth
+const BASELINE_RATIO: f64 = 0.1;
+
+/// Compute median depth of observed points from current camera pose
+fn compute_median_depth(
+    observations: &[StereoObservation],
+    world: &WorldState,
+    current_pose: &SE3<f64>,
+) -> Option<f64> {
+    let inverse_pose = current_pose.inverse();
+    let mut depths: Vec<f64> = observations
+        .iter()
+        .filter_map(|obs| world.get_point(obs.point_id))
+        .map(|world_pt| {
+            let cam_pt = inverse_pose.transform_point(world_pt);
+            cam_pt.z
+        })
+        .filter(|&z| z > 0.0)
+        .collect();
+
+    if depths.is_empty() {
+        return None;
+    }
+    depths.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(depths[depths.len() / 2])
+}
 
 fn main() {
     let args = Args::parse();
@@ -174,6 +204,8 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_gba_frame_graph: Option<FrameGraph> = None;
     let mut prev_frame_graph: Option<FrameGraph> = None;
     let mut marginalized_prior: Option<MarginalizedPrior> = None;
+    // Keyframe selection: track position of last keyframe for baseline computation
+    let mut last_keyframe_position: Vec3<f64> = Vec3::new(0.0, 0.0, 0.0);
 
     // MAIN LOOP
     for frame_idx in 1..total_frames {
@@ -245,7 +277,21 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             new_points_count as f64 / current_frame_obs.len() as f64
         };
 
-        let should_create_keyframe = novelty_ratio >= 0.3;
+        // Compute baseline (translation) since last keyframe
+        let current_position = last_pose.translation;
+        let translation_since_keyframe = (current_position - last_keyframe_position).norm();
+
+        // Adaptive baseline threshold based on median depth of visible points
+        let sufficient_baseline = if let Some(median_depth) = compute_median_depth(current_frame_obs, &world, &last_pose) {
+            let min_baseline = median_depth * BASELINE_RATIO;
+            translation_since_keyframe >= min_baseline
+        } else {
+            // No existing points visible - use novelty as fallback
+            novelty_ratio >= 0.3
+        };
+
+        // Create keyframe if sufficient baseline OR high novelty (new scene regions)
+        let should_create_keyframe = sufficient_baseline || novelty_ratio >= 0.3;
         // LBA uses keyframes to figure out what points to gauge fix. Storing this information in the frame graph is slightly redundant with world state.
         let frame_role = if should_create_keyframe {
             FrameRole::Keyframe
@@ -259,9 +305,10 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         // Triangulate new points if this is a keyframe
         if should_create_keyframe {
             println!(
-                "  Creating keyframe from frame {} (novelty: {:.1}%)",
+                "  Creating keyframe from frame {} (novelty: {:.1}%, baseline: {:.3}m)",
                 frame_idx,
-                novelty_ratio * 100.0
+                novelty_ratio * 100.0,
+                translation_since_keyframe
             );
 
             for obs in current_frame_obs.iter() {
@@ -270,6 +317,9 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
                     world.triangulate_and_add_point(obs, &stereo_camera, frame_idx);
                 }
             }
+
+            // Update last keyframe position for next baseline computation
+            last_keyframe_position = current_position;
         }
         let obs_count = current_frame_obs.len();
 
