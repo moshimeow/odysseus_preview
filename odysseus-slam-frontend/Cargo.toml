@@ -7,6 +7,11 @@ edition = "2021"
 image = "0.24"
 imageproc = "0.23"
 rerun = "0.27.2"
+exr = "1.7"
+
+# For loading camera poses and SE3 types
+odysseus-slam = { path = "../odysseus-slam" }
+odysseus-solver = { path = "../odysseus-solver" }
 
 [[example]]
 name = "detect_features"

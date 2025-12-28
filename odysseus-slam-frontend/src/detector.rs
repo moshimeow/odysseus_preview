@@ -1,7 +1,9 @@
-//! FAST corner detection with Harris response scoring and non-maximum suppression
+//! FAST corner detection with Shi-Tomasi scoring and non-maximum suppression
 //!
 //! Implements FAST-9 corner detection (9 contiguous pixels on a 16-pixel Bresenham circle
 //! must all be brighter or darker than center by a threshold).
+//!
+//! Uses Shi-Tomasi scoring (minimum eigenvalue) instead of Harris for better trackability.
 
 use image::GrayImage;
 use std::collections::HashMap;
@@ -9,17 +11,17 @@ use std::collections::HashMap;
 /// A detected keypoint with position, response strength, and orientation
 #[derive(Debug, Clone, Copy)]
 pub struct KeyPoint {
-    /// X coordinate (column) in pixels
+    /// X coordinate (column) in pixels - may be subpixel
     pub x: f32,
-    /// Y coordinate (row) in pixels
+    /// Y coordinate (row) in pixels - may be subpixel
     pub y: f32,
-    /// Harris corner response (higher = stronger corner)
+    /// Shi-Tomasi response: min eigenvalue (higher = more trackable)
     pub response: f32,
     /// Orientation in radians (computed via intensity centroid)
     pub angle: f32,
 }
 
-/// FAST corner detector with Harris scoring and grid-based NMS
+/// FAST corner detector with Shi-Tomasi scoring and grid-based NMS
 pub struct FastDetector {
     /// Intensity difference threshold for FAST (typically 20-40)
     threshold: u8,
@@ -27,8 +29,10 @@ pub struct FastDetector {
     grid_size: usize,
     /// Maximum number of features to return
     max_features: usize,
-    /// Harris corner response parameter (typically 0.04)
-    harris_k: f32,
+    /// Minimum Shi-Tomasi response (min eigenvalue) to accept a corner
+    min_eigen_threshold: f32,
+    /// Whether to use subpixel refinement
+    subpixel_refinement: bool,
 }
 
 impl Default for FastDetector {
@@ -37,7 +41,8 @@ impl Default for FastDetector {
             threshold: 20,
             grid_size: 32,
             max_features: 500,
-            harris_k: 0.04,
+            min_eigen_threshold: 10.0, // Minimum eigenvalue to accept
+            subpixel_refinement: true,
         }
     }
 }
@@ -49,8 +54,21 @@ impl FastDetector {
             threshold,
             grid_size,
             max_features,
-            harris_k: 0.04,
+            min_eigen_threshold: 10.0,
+            subpixel_refinement: true,
         }
+    }
+
+    /// Set the minimum eigenvalue threshold for corner acceptance
+    pub fn with_min_eigen_threshold(mut self, threshold: f32) -> Self {
+        self.min_eigen_threshold = threshold;
+        self
+    }
+
+    /// Enable or disable subpixel refinement
+    pub fn with_subpixel_refinement(mut self, enabled: bool) -> Self {
+        self.subpixel_refinement = enabled;
+        self
     }
 
     /// Detect keypoints in a grayscale image
@@ -59,34 +77,48 @@ impl FastDetector {
         let width = width as usize;
         let height = height as usize;
 
-        // Need 3-pixel border for FAST circle
-        if width < 7 || height < 7 {
+        // Need 3-pixel border for FAST circle + gradient computation
+        if width < 10 || height < 10 {
             return Vec::new();
         }
 
         // Step 1: Find all FAST corners
         let mut candidates: Vec<(usize, usize)> = Vec::new();
 
-        for y in 3..(height - 3) {
-            for x in 3..(width - 3) {
+        for y in 4..(height - 4) {
+            for x in 4..(width - 4) {
                 if self.is_fast_corner(image, x, y) {
                     candidates.push((x, y));
                 }
             }
         }
 
-        // Step 2: Compute Harris response for each candidate
+        // Step 2: Compute Shi-Tomasi response (min eigenvalue) for each candidate
+        // and filter by minimum eigenvalue threshold
         let mut keypoints: Vec<KeyPoint> = candidates
             .iter()
-            .map(|&(x, y)| {
-                let response = self.harris_response(image, x, y);
+            .filter_map(|&(x, y)| {
+                let response = self.shi_tomasi_response(image, x, y);
+
+                // Filter out weak corners - this is the key improvement!
+                if response < self.min_eigen_threshold {
+                    return None;
+                }
+
+                // Apply subpixel refinement if enabled
+                let (refined_x, refined_y) = if self.subpixel_refinement {
+                    self.subpixel_refine(image, x, y)
+                } else {
+                    (x as f32, y as f32)
+                };
+
                 let angle = self.compute_orientation(image, x, y);
-                KeyPoint {
-                    x: x as f32,
-                    y: y as f32,
+                Some(KeyPoint {
+                    x: refined_x,
+                    y: refined_y,
                     response,
                     angle,
-                }
+                })
             })
             .collect();
 
@@ -193,14 +225,17 @@ impl FastDetector {
         max_consecutive_dark >= 9
     }
 
-    /// Compute Harris corner response at a pixel
+    /// Compute Shi-Tomasi corner response at a pixel
     ///
     /// Uses a 7x7 window to compute the structure tensor and returns
-    /// det(M) - k * trace(M)^2
-    fn harris_response(&self, image: &GrayImage, x: usize, y: usize) -> f32 {
+    /// the minimum eigenvalue: min(λ1, λ2)
+    ///
+    /// This directly measures "trackability" - corners with high min eigenvalue
+    /// will track well with Lucas-Kanade.
+    fn shi_tomasi_response(&self, image: &GrayImage, x: usize, y: usize) -> f32 {
         let (width, height) = image.dimensions();
 
-        // Compute gradients using Sobel-like kernel
+        // Compute gradients using central differences
         // We use a 7x7 window centered at (x, y)
         let mut sum_ix2: f32 = 0.0;
         let mut sum_iy2: f32 = 0.0;
@@ -230,10 +265,53 @@ impl FastDetector {
             }
         }
 
-        // Harris response: det(M) - k * trace(M)^2
-        let det = sum_ix2 * sum_iy2 - sum_ixiy * sum_ixiy;
+        // Shi-Tomasi response: minimum eigenvalue of structure tensor
+        // For 2x2 matrix M = [[a, b], [b, c]], eigenvalues are:
+        // λ = (trace ± sqrt(trace² - 4*det)) / 2
+        // min eigenvalue = (trace - sqrt(trace² - 4*det)) / 2
         let trace = sum_ix2 + sum_iy2;
-        det - self.harris_k * trace * trace
+        let det = sum_ix2 * sum_iy2 - sum_ixiy * sum_ixiy;
+        let discriminant = (trace * trace - 4.0 * det).max(0.0);
+        (trace - discriminant.sqrt()) / 2.0
+    }
+
+    /// Refine corner position to subpixel accuracy
+    ///
+    /// Uses the gradient-based method: fits a quadratic to the corner response
+    /// surface and finds the peak analytically.
+    fn subpixel_refine(&self, image: &GrayImage, x: usize, y: usize) -> (f32, f32) {
+        // Compute corner response at center and neighbors
+        let c = self.shi_tomasi_response(image, x, y);
+        let l = self.shi_tomasi_response(image, x.saturating_sub(1), y);
+        let r = self.shi_tomasi_response(image, x + 1, y);
+        let u = self.shi_tomasi_response(image, x, y.saturating_sub(1));
+        let d = self.shi_tomasi_response(image, x, y + 1);
+
+        // Fit parabola in x: f(x) = ax² + bx + c
+        // Using 3 points: (-1, l), (0, c), (1, r)
+        // a = (l + r - 2c) / 2
+        // b = (r - l) / 2
+        // Peak at x = -b / (2a)
+        let ax = (l + r - 2.0 * c) / 2.0;
+        let bx = (r - l) / 2.0;
+
+        let dx = if ax.abs() > 1e-6 {
+            (-bx / (2.0 * ax)).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        };
+
+        // Same for y
+        let ay = (u + d - 2.0 * c) / 2.0;
+        let by = (d - u) / 2.0;
+
+        let dy = if ay.abs() > 1e-6 {
+            (-by / (2.0 * ay)).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        };
+
+        (x as f32 + dx, y as f32 + dy)
     }
 
     /// Compute keypoint orientation using intensity centroid method

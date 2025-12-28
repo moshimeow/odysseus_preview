@@ -60,8 +60,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut tracker = Tracker::with_config(config);
 
-    // Track feature history for visualization (id -> list of positions)
-    let mut track_history: HashMap<usize, Vec<(f32, f32)>> = HashMap::new();
+    // Track feature history for visualization (id -> list of (left_pos, right_pos option))
+    let mut track_history: HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>> = HashMap::new();
 
     // Process each frame
     let total_frames = frame_numbers.len();
@@ -103,10 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Update track history
         for track in &tracks {
+            let left_pos = (track.stereo.left_kp.x, track.stereo.left_kp.y);
+            let right_pos = if track.age == 0 {
+                Some((track.stereo.right_kp.x, track.stereo.right_kp.y))
+            } else {
+                None
+            };
             track_history
                 .entry(track.id)
                 .or_default()
-                .push((track.stereo.left_kp.x, track.stereo.left_kp.y));
+                .push((left_pos, right_pos));
         }
 
         // Set timeline
@@ -123,20 +129,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &rr::Image::from_rgb24(composite.into_raw(), [width * 2, height]),
         )?;
 
-        // Log keypoints on left side of composite
-        log_left_keypoints(&rec, "stereo_view/left_keypoints", &tracks, &track_history)?;
+        // Log keypoints on left side of composite (view_idx=0)
+        log_keypoints(&rec, "stereo_view/left_keypoints", &tracks, &track_history, 0, width)?;
 
-        // Log keypoints on right side of composite
-        log_right_keypoints(&rec, "stereo_view/right_keypoints", &tracks, width)?;
+        // Log keypoints on right side of composite (view_idx=1)
+        log_keypoints(&rec, "stereo_view/right_keypoints", &tracks, &track_history, 1, width)?;
 
         // Log stereo match lines (colored by inlier/outlier status)
         log_stereo_matches(&rec, "stereo_view/matches", &tracks, width)?;
 
-        // Log IDs as floating text above points
-        log_keypoint_labels(&rec, "stereo_view/labels", &tracks)?;
-
-        // Log track trajectories on left image
-        log_track_trajectories(&rec, "stereo_view/tracks", &tracks, &track_history)?;
+        // Log track trajectories on both views
+        log_track_trajectories(&rec, "stereo_view/left_tracks", &tracks, &track_history, 0, width)?;
+        log_track_trajectories(&rec, "stereo_view/right_tracks", &tracks, &track_history, 1, width)?;
 
         // Log disparity statistics
         log_disparity_info(&rec, "stats/disparity", &tracks)?;
@@ -157,14 +161,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let track_lengths: Vec<usize> = track_history.values().map(|v| v.len()).collect();
     if !track_lengths.is_empty() {
+        let total_tracks = track_lengths.len();
         let max_len = *track_lengths.iter().max().unwrap();
-        let avg_len: f32 = track_lengths.iter().sum::<usize>() as f32 / track_lengths.len() as f32;
-        let long_tracks = track_lengths.iter().filter(|&&l| l >= 5).count();
+        let avg_len: f32 = track_lengths.iter().sum::<usize>() as f32 / total_tracks as f32;
 
-        println!("Total unique tracks: {}", track_history.len());
+        // Count tracks above various thresholds
+        let above_5 = track_lengths.iter().filter(|&&l| l >= 5).count();
+        let above_10 = track_lengths.iter().filter(|&&l| l >= 10).count();
+        let above_20 = track_lengths.iter().filter(|&&l| l >= 20).count();
+        let above_40 = track_lengths.iter().filter(|&&l| l >= 40).count();
+
+        println!("Total unique tracks: {}", total_tracks);
         println!("Max track length: {} frames", max_len);
         println!("Avg track length: {:.1} frames", avg_len);
-        println!("Tracks >= 5 frames: {}", long_tracks);
+        println!();
+        println!("Track length distribution:");
+        println!("  >= 5 frames:  {:4} ({:5.1}%)", above_5, 100.0 * above_5 as f32 / total_tracks as f32);
+        println!("  >= 10 frames: {:4} ({:5.1}%)", above_10, 100.0 * above_10 as f32 / total_tracks as f32);
+        println!("  >= 20 frames: {:4} ({:5.1}%)", above_20, 100.0 * above_20 as f32 / total_tracks as f32);
+        println!("  >= 40 frames: {:4} ({:5.1}%)", above_40, 100.0 * above_40 as f32 / total_tracks as f32);
     }
 
     println!("\nRerun visualization active. Close the viewer to exit.");
@@ -194,20 +209,42 @@ fn create_side_by_side(left: &RgbImage, right: &RgbImage) -> RgbImage {
     composite
 }
 
-/// Log keypoints on left side with color based on track age
-fn log_left_keypoints(
+/// Log keypoints with labels
+/// view_idx: 0 = left image, 1 = right image (offset by image_width)
+fn log_keypoints(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    history: &HashMap<usize, Vec<(f32, f32)>>,
+    history: &HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>>,
+    view_idx: u32,
+    image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let positions: Vec<[f32; 2]> = tracks
+    let x_offset = view_idx as f32 * image_width as f32;
+
+    // For right view, only show tracks with valid stereo matches
+    let filtered_tracks: Vec<_> = if view_idx == 0 {
+        tracks.iter().collect()
+    } else {
+        tracks.iter().filter(|t| t.age == 0).collect()
+    };
+
+    if filtered_tracks.is_empty() {
+        return Ok(());
+    }
+
+    let positions: Vec<[f32; 2]> = filtered_tracks
         .iter()
-        .map(|t| [t.stereo.left_kp.x, t.stereo.left_kp.y])
+        .map(|t| {
+            if view_idx == 0 {
+                [t.stereo.left_kp.x + x_offset, t.stereo.left_kp.y]
+            } else {
+                [t.stereo.right_kp.x + x_offset, t.stereo.right_kp.y]
+            }
+        })
         .collect();
 
     // Color based on track length (longer = greener)
-    let point_colors: Vec<[u8; 3]> = tracks
+    let point_colors: Vec<[u8; 3]> = filtered_tracks
         .iter()
         .map(|t| {
             let track_len = history.get(&t.id).map(|h| h.len()).unwrap_or(1);
@@ -216,42 +253,24 @@ fn log_left_keypoints(
         .collect();
 
     // Size based on whether stereo match is valid
-    let radii: Vec<f32> = tracks
+    let radii: Vec<f32> = filtered_tracks
         .iter()
         .map(|t| if t.age == 0 { 6.0 } else { 4.0 })
+        .collect();
+
+    // Labels showing track IDs
+    let labels: Vec<String> = filtered_tracks
+        .iter()
+        .map(|t| format!("{}", t.id))
         .collect();
 
     rec.log(
         path,
         &rr::Points2D::new(positions)
             .with_colors(point_colors)
-            .with_radii(radii),
-    )?;
-
-    Ok(())
-}
-
-/// Log keypoints on right side of composite (offset by image width)
-fn log_right_keypoints(
-    rec: &rr::RecordingStream,
-    path: &str,
-    tracks: &[TrackedFeature],
-    image_width: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let valid_tracks: Vec<_> = tracks.iter().filter(|t| t.age == 0).collect();
-
-    let positions: Vec<[f32; 2]> = valid_tracks
-        .iter()
-        .map(|t| [t.stereo.right_kp.x + image_width as f32, t.stereo.right_kp.y])
-        .collect();
-
-    // Green for valid stereo matches
-    let num_points = positions.len();
-    rec.log(
-        path,
-        &rr::Points2D::new(positions)
-            .with_colors(vec![[100u8, 255, 100]; num_points])
-            .with_radii(vec![5.0; num_points]),
+            .with_radii(radii)
+            .with_labels(labels)
+            .with_show_labels(true),
     )?;
 
     Ok(())
@@ -305,58 +324,37 @@ fn log_stereo_matches(
     Ok(())
 }
 
-/// Log keypoint IDs as floating text above points
-fn log_keypoint_labels(
-    rec: &rr::RecordingStream,
-    path: &str,
-    tracks: &[TrackedFeature],
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Only show labels for tracks with valid stereo matches
-    let valid_tracks: Vec<_> = tracks.iter().filter(|t| t.age == 0).collect();
-
-    if valid_tracks.is_empty() {
-        return Ok(());
-    }
-
-    // Position labels slightly above the keypoints
-    let label_offset_y = -12.0;
-
-    let positions: Vec<[f32; 2]> = valid_tracks
-        .iter()
-        .map(|t| [t.stereo.left_kp.x, t.stereo.left_kp.y + label_offset_y])
-        .collect();
-
-    let labels: Vec<String> = valid_tracks
-        .iter()
-        .map(|t| format!("{}", t.id))
-        .collect();
-
-    rec.log(
-        path,
-        &rr::Points2D::new(positions)
-            .with_labels(labels)
-            .with_radii(vec![0.0; valid_tracks.len()]), // Invisible points, just show labels
-    )?;
-
-    Ok(())
-}
-
-/// Log track trajectories on left image
+/// Log track trajectories
+/// view_idx: 0 = left image, 1 = right image (offset by image_width)
 fn log_track_trajectories(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    history: &HashMap<usize, Vec<(f32, f32)>>,
+    history: &HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>>,
+    view_idx: u32,
+    image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let x_offset = view_idx as f32 * image_width as f32;
     let mut strips: Vec<Vec<[f32; 2]>> = Vec::new();
     let mut line_colors: Vec<[u8; 3]> = Vec::new();
 
     for track in tracks {
         if let Some(positions) = history.get(&track.id) {
-            if positions.len() >= 2 {
-                let strip: Vec<[f32; 2]> = positions.iter().map(|&(x, y)| [x, y]).collect();
-                let track_len = positions.len();
-                strips.push(strip);
+            // Extract positions for this view
+            let view_positions: Vec<[f32; 2]> = positions
+                .iter()
+                .filter_map(|(left, right)| {
+                    if view_idx == 0 {
+                        Some([left.0 + x_offset, left.1])
+                    } else {
+                        right.map(|(x, y)| [x + x_offset, y])
+                    }
+                })
+                .collect();
+
+            if view_positions.len() >= 2 {
+                let track_len = view_positions.len();
+                strips.push(view_positions);
                 line_colors.push(track_age_color(track_len));
             }
         }

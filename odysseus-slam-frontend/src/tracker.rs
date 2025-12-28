@@ -47,8 +47,14 @@ impl Default for TrackerConfig {
         Self {
             min_features: 100,
             max_features: 300,
-            max_age_without_stereo: 3,
-            lk_config: LKConfig::default(),
+            max_age_without_stereo: 5, // Allow more frames without stereo before pruning
+            lk_config: LKConfig {
+                win_size: 15,           // Larger window for more robust tracking (was 11)
+                max_iterations: 30,
+                epsilon: 0.01,
+                num_levels: 4,          // More pyramid levels for larger motions (was 3)
+                min_eigenvalue: 0.0001, // Lower threshold to not reject corners (was 0.001)
+            },
             grid_size: 64,
         }
     }
@@ -83,13 +89,18 @@ impl Tracker {
 
     /// Create a new tracker with custom configuration
     pub fn with_config(config: TrackerConfig) -> Self {
+        // Configure detector with higher thresholds for more stable corners
+        let detector = FastDetector::new(25, 32, config.max_features) // FAST threshold 25 (was 20)
+            .with_min_eigen_threshold(100.0) // Higher = fewer but more stable corners
+            .with_subpixel_refinement(true);
+
         Self {
             lk_tracker: LKTracker::with_config(config.lk_config.clone()),
             config,
             tracks: HashMap::new(),
             next_id: 0,
             frame_idx: 0,
-            detector: FastDetector::default(),
+            detector,
             extractor: BriefExtractor::new(),
             stereo_matcher: StereoMatcher::default(),
             prev_left: None,
@@ -115,6 +126,8 @@ impl Tracker {
         };
 
         // Step 2: Update tracked feature positions
+        // Features that fail LK tracking keep their old positions
+        // and will be pruned if stereo matching fails repeatedly
         for (id, new_pos) in &tracked_positions {
             if let Some(feature) = self.tracks.get_mut(id) {
                 feature.stereo.left_kp.x = new_pos.0;
@@ -322,7 +335,7 @@ fn find_stereo_match(
     let max_vertical_diff = 2.0;
     let min_disparity = 1.0;
     let max_disparity = 200.0;
-    let max_hamming = 64;
+    let max_hamming = 48; // Stricter descriptor matching (was 64)
 
     let mut best_match: Option<(KeyPoint, f32, u32)> = None;
     let mut second_best_dist = u32::MAX;
@@ -357,8 +370,8 @@ fn find_stereo_match(
     // Apply thresholds
     if let Some((right_kp, disparity, dist)) = best_match {
         if dist <= max_hamming {
-            // Ratio test
-            if second_best_dist == u32::MAX || (dist as f32 / second_best_dist as f32) < 0.8 {
+            // Ratio test - stricter threshold (was 0.8)
+            if second_best_dist == u32::MAX || (dist as f32 / second_best_dist as f32) < 0.7 {
                 return Some((right_kp, disparity));
             }
         }
