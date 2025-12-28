@@ -91,9 +91,9 @@ impl Tracker {
 
     /// Create a new tracker with custom configuration
     pub fn with_config(config: TrackerConfig) -> Self {
-        // Configure detector with higher thresholds for more stable corners
-        let detector = FastDetector::new(25, 32, config.max_features) // FAST threshold 25 (was 20)
-            .with_min_eigen_threshold(100.0) // Higher = fewer but more stable corners
+        // Configure detector - with forward-backward check we can be more permissive
+        let detector = FastDetector::new(20, 32, config.max_features)
+            .with_min_eigen_threshold(10.0)
             .with_subpixel_refinement(true);
 
         Self {
