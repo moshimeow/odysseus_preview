@@ -458,7 +458,10 @@ fn log_gt_trajectories(
         }
     }
 
-    if !gt_strips.is_empty() {
+    // Always log to clear stale data from previous frames
+    if gt_strips.is_empty() {
+        rec.log(path, &rr::LineStrips2D::new(Vec::<Vec<[f32; 2]>>::new()))?;
+    } else {
         rec.log(
             path,
             &rr::LineStrips2D::new(gt_strips)
@@ -511,7 +514,9 @@ fn log_keypoints(
         tracks.iter().filter(|t| t.age == 0).collect()
     };
 
+    // Always log to clear stale data from previous frames
     if filtered_tracks.is_empty() {
+        rec.log(path, &rr::Points2D::new(Vec::<[f32; 2]>::new()))?;
         return Ok(());
     }
 
@@ -595,7 +600,10 @@ fn log_stereo_matches(
         }
     }
 
-    if !strips.is_empty() {
+    // Always log to clear stale data from previous frames
+    if strips.is_empty() {
+        rec.log(path, &rr::LineStrips2D::new(Vec::<Vec<[f32; 2]>>::new()))?;
+    } else {
         rec.log(
             path,
             &rr::LineStrips2D::new(strips)
@@ -643,7 +651,10 @@ fn log_track_trajectories(
         }
     }
 
-    if !strips.is_empty() {
+    // Always log to clear stale data from previous frames
+    if strips.is_empty() {
+        rec.log(path, &rr::LineStrips2D::new(Vec::<Vec<[f32; 2]>>::new()))?;
+    } else {
         rec.log(
             path,
             &rr::LineStrips2D::new(strips)
@@ -693,10 +704,43 @@ fn log_disparity_info(
 }
 
 /// Color based on track age (short = red, long = green)
+/// Uses HSV interpolation: red (0°) -> yellow (60°) -> green (120°)
 fn track_age_color(length: usize) -> [u8; 3] {
     let norm = (length as f32 / 20.0).min(1.0);
-    let r = ((1.0 - norm) * 255.0) as u8;
-    let g = (norm * 255.0) as u8;
-    [r, g, 100]
+    // Hue: 0 (red) to 120 (green) degrees, normalized to 0-1
+    let hue = norm * (120.0 / 360.0);
+    let saturation = 1.0;
+    let value = 1.0;
+    hsv_to_rgb(hue, saturation, value)
+}
+
+/// Convert HSV to RGB
+/// h: 0-1 (0=red, 1/6=yellow, 1/3=green, etc.)
+/// s, v: 0-1
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let c = v * s;
+    let h_prime = h * 6.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    [
+        ((r1 + m) * 255.0) as u8,
+        ((g1 + m) * 255.0) as u8,
+        ((b1 + m) * 255.0) as u8,
+    ]
 }
 
