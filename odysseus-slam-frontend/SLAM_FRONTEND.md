@@ -8,3 +8,11 @@ Inverse compositional image alignment:
 https://www.ncorr.com/download/publications/bakerequivalence.pdf
 Locally Scaled Sum of Squared Differences (LSSD) image alignment norm:
 https://web.tecnico.ulisboa.pt/~ist14359/wordpress/nfvr_pubs/wspc02.pdf
+
+
+
+
+Moshi bullshit:
+Image pyramids, why do it?
+    - Tracking all features in all scales at the same time.
+    
