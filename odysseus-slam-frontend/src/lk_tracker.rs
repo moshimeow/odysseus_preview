@@ -20,6 +20,9 @@ pub struct LKConfig {
     pub num_levels: usize,
     /// Minimum eigenvalue threshold for valid tracking
     pub min_eigenvalue: f32,
+    /// Forward-backward error threshold (pixels). If tracking A->B->A' gives
+    /// |A - A'| > this threshold, reject the track. Set to 0 to disable.
+    pub forward_backward_threshold: f32,
 }
 
 impl Default for LKConfig {
@@ -30,6 +33,7 @@ impl Default for LKConfig {
             epsilon: 0.01,
             num_levels: 3,
             min_eigenvalue: 0.001,
+            forward_backward_threshold: 1.0, // Reject if round-trip error > 1 pixel
         }
     }
 }
@@ -64,6 +68,7 @@ impl LKTracker {
     }
 
     /// Track a set of points from prev_image to next_image
+    /// If forward_backward_threshold > 0, performs forward-backward consistency check
     pub fn track(
         &self,
         prev_image: &GrayImage,
@@ -74,10 +79,61 @@ impl LKTracker {
         let prev_pyramid = self.build_pyramid(prev_image);
         let next_pyramid = self.build_pyramid(next_image);
 
-        // Track each point
-        points
+        // Forward tracking: prev -> next
+        let forward_results: Vec<TrackResult> = points
             .iter()
             .map(|&pt| self.track_point(&prev_pyramid, &next_pyramid, pt))
+            .collect();
+
+        // If forward-backward check is disabled, return forward results
+        if self.config.forward_backward_threshold <= 0.0 {
+            return forward_results;
+        }
+
+        // Backward tracking: next -> prev (only for successful forward tracks)
+        let backward_points: Vec<(f32, f32)> = forward_results
+            .iter()
+            .map(|r| r.position)
+            .collect();
+
+        let backward_results: Vec<TrackResult> = backward_points
+            .iter()
+            .map(|&pt| self.track_point(&next_pyramid, &prev_pyramid, pt))
+            .collect();
+
+        // Check forward-backward consistency
+        let fb_threshold_sq = self.config.forward_backward_threshold * self.config.forward_backward_threshold;
+
+        points
+            .iter()
+            .zip(forward_results.iter())
+            .zip(backward_results.iter())
+            .map(|((&orig_pt, fwd), bwd)| {
+                if !fwd.success || !bwd.success {
+                    return TrackResult {
+                        position: orig_pt,
+                        success: false,
+                        error: f32::MAX,
+                    };
+                }
+
+                // Compute round-trip error: |original - backward_result|
+                let dx = orig_pt.0 - bwd.position.0;
+                let dy = orig_pt.1 - bwd.position.1;
+                let fb_error_sq = dx * dx + dy * dy;
+
+                if fb_error_sq > fb_threshold_sq {
+                    // Forward-backward check failed
+                    TrackResult {
+                        position: orig_pt,
+                        success: false,
+                        error: fb_error_sq.sqrt(),
+                    }
+                } else {
+                    // Passed! Return forward result
+                    *fwd
+                }
+            })
             .collect()
     }
 

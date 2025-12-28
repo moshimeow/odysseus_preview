@@ -28,3 +28,7 @@ path = "examples/track_sequence.rs"
 [[example]]
 name = "track_sequence_rerun"
 path = "examples/track_sequence_rerun.rs"
+
+[[example]]
+name = "exr_inspect"
+path = "examples/exr_inspect.rs"

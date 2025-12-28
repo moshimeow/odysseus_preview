@@ -126,8 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cy: 512.0,
     };
 
-    // Flow error accumulator
-    let mut flow_errors: Vec<f64> = Vec::new();
+    // Flow error accumulators
+    let mut cumulative_errors: Vec<f64> = Vec::new(); // Error from track start to current
+    let mut per_frame_errors: Vec<f64> = Vec::new();  // Error between consecutive frames
 
     // Process each frame
     let total_frames = frame_numbers.len();
@@ -225,11 +226,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for track in &tracks {
                     if let Some((_, _, gt_positions)) = gt_tracks.get(&track.id) {
                         if gt_positions.len() >= 2 {
+                            // Cumulative error: current tracked vs current GT
                             let gt_curr = gt_positions.last().unwrap();
                             let tracked_curr = (track.stereo.left_kp.x, track.stereo.left_kp.y);
-                            let error = ((gt_curr.0 - tracked_curr.0).powi(2)
+                            let cumulative_error = ((gt_curr.0 - tracked_curr.0).powi(2)
                                        + (gt_curr.1 - tracked_curr.1).powi(2)).sqrt() as f64;
-                            flow_errors.push(error);
+                            cumulative_errors.push(cumulative_error);
+
+                            // Per-frame error: compare frame-to-frame motion
+                            // GT motion: gt_positions[-1] - gt_positions[-2]
+                            // Tracked motion: we need history, use track_history
+                            if let Some(hist) = track_history.get(&track.id) {
+                                if hist.len() >= 2 {
+                                    let prev_tracked = hist[hist.len() - 1].1; // previous tracked pos
+                                    let gt_prev = &gt_positions[gt_positions.len() - 2];
+
+                                    // GT flow this frame
+                                    let gt_flow = (gt_curr.0 - gt_prev.0, gt_curr.1 - gt_prev.1);
+                                    // Tracked flow this frame
+                                    let tracked_flow = (
+                                        tracked_curr.0 - prev_tracked.0,
+                                        tracked_curr.1 - prev_tracked.1,
+                                    );
+                                    // Per-frame error is difference in flow vectors
+                                    let frame_error = ((tracked_flow.0 - gt_flow.0).powi(2)
+                                                     + (tracked_flow.1 - gt_flow.1).powi(2)).sqrt() as f64;
+                                    per_frame_errors.push(frame_error);
+                                }
+                            }
                         }
                     }
                 }
@@ -321,16 +345,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Print flow accuracy statistics
-    if !flow_errors.is_empty() {
-        flow_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mean_error: f64 = flow_errors.iter().sum::<f64>() / flow_errors.len() as f64;
-        let median_error = flow_errors[flow_errors.len() / 2];
-        let p90_error = flow_errors[(flow_errors.len() as f64 * 0.9) as usize];
-        let p99_error = flow_errors[(flow_errors.len() as f64 * 0.99).min(flow_errors.len() as f64 - 1.0) as usize];
+    if !per_frame_errors.is_empty() {
+        per_frame_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean_error: f64 = per_frame_errors.iter().sum::<f64>() / per_frame_errors.len() as f64;
+        let median_error = per_frame_errors[per_frame_errors.len() / 2];
+        let p90_error = per_frame_errors[(per_frame_errors.len() as f64 * 0.9) as usize];
+        let p99_error = per_frame_errors[(per_frame_errors.len() as f64 * 0.99).min(per_frame_errors.len() as f64 - 1.0) as usize];
 
         println!();
-        println!("=== Flow Accuracy (vs Ground Truth) ===");
-        println!("Measurements: {}", flow_errors.len());
+        println!("=== Per-Frame Flow Accuracy (vs Ground Truth) ===");
+        println!("Measurements: {}", per_frame_errors.len());
+        println!("Mean error:   {:.2} pixels", mean_error);
+        println!("Median error: {:.2} pixels", median_error);
+        println!("90th %%ile:   {:.2} pixels", p90_error);
+        println!("99th %%ile:   {:.2} pixels", p99_error);
+    }
+
+    if !cumulative_errors.is_empty() {
+        cumulative_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean_error: f64 = cumulative_errors.iter().sum::<f64>() / cumulative_errors.len() as f64;
+        let median_error = cumulative_errors[cumulative_errors.len() / 2];
+        let p90_error = cumulative_errors[(cumulative_errors.len() as f64 * 0.9) as usize];
+        let p99_error = cumulative_errors[(cumulative_errors.len() as f64 * 0.99).min(cumulative_errors.len() as f64 - 1.0) as usize];
+
+        println!();
+        println!("=== Cumulative Track Drift (from start) ===");
+        println!("Measurements: {}", cumulative_errors.len());
         println!("Mean error:   {:.2} pixels", mean_error);
         println!("Median error: {:.2} pixels", median_error);
         println!("90th %%ile:   {:.2} pixels", p90_error);

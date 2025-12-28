@@ -53,7 +53,9 @@ impl Default for TrackerConfig {
                 max_iterations: 30,
                 epsilon: 0.01,
                 num_levels: 4,          // More pyramid levels for larger motions (was 3)
-                min_eigenvalue: 0.0001, // Lower threshold to not reject corners (was 0.001)
+                min_eigenvalue: 10.0,   // Reject tracking if landed on flat/edge region
+                                        // Detection uses 100.0, tracking is more permissive
+                forward_backward_threshold: 2.0, // Reject if round-trip error > 2 pixels
             },
             grid_size: 64,
         }
