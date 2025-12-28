@@ -1,11 +1,17 @@
 //! Example: Track features across a stereo image sequence with Rerun visualization
 //!
 //! Usage:
-//!   cargo run --release --example track_sequence_rerun -- <image_dir>
+//!   cargo run --release --example track_sequence_rerun -- <data_dir>
 //!
-//! Expects images named like: 0001_L.jpg, 0001_R.jpg, 0002_L.jpg, etc.
+//! Expects:
+//! - images/ImageXXXX_L.jpg, images/ImageXXXX_R.jpg
+//! - images/depthXXXX_L.exr, images/depthXXXX_R.exr
+//! - camera_poses.bin (in data_dir)
 
+use odysseus_slam::math::SE3;
+use odysseus_slam::utils::load_camera_poses;
 use odysseus_slam_frontend::{TrackedFeature, Tracker, TrackerConfig};
+use odysseus_solver::math3d::Vec3;
 use rerun as rr;
 use std::collections::HashMap;
 use std::env;
@@ -13,33 +19,77 @@ use std::path::Path;
 
 use image::{GrayImage, RgbImage};
 
+/// Camera intrinsics (adjust these to match your Blender camera)
+struct CameraIntrinsics {
+    fx: f64,
+    fy: f64,
+    cx: f64,
+    cy: f64,
+}
+
+impl CameraIntrinsics {
+    /// Project a 3D point to 2D pixel coordinates
+    fn project(&self, p: &Vec3<f64>) -> Option<(f64, f64)> {
+        if p.z <= 0.0 {
+            return None;
+        }
+        let x = self.fx * p.x / p.z + self.cx;
+        let y = self.fy * p.y / p.z + self.cy;
+        Some((x, y))
+    }
+
+    /// Unproject a 2D pixel with depth to 3D point
+    fn unproject(&self, u: f64, v: f64, depth: f64) -> Vec3<f64> {
+        let x = (u - self.cx) * depth / self.fx;
+        let y = (v - self.cy) * depth / self.fy;
+        Vec3::new(x, y, depth)
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <image_dir>", args[0]);
+        eprintln!("Usage: {} <data_dir>", args[0]);
         eprintln!("\nThis example tracks features across a stereo image sequence");
         eprintln!("and visualizes using Rerun.");
-        eprintln!("Images should be named: 0001_L.jpg, 0001_R.jpg, 0002_L.jpg, etc.");
+        eprintln!("\nExpected structure:");
+        eprintln!("  <data_dir>/images/ImageXXXX_L.jpg");
+        eprintln!("  <data_dir>/images/depthXXXX_L.exr");
+        eprintln!("  <data_dir>/camera_poses.bin");
         std::process::exit(1);
     }
 
-    let image_dir = Path::new(&args[1]);
+    let data_dir = Path::new(&args[1]);
+    let image_dir = data_dir.join("images");
+
+    // Load camera poses
+    let poses_path = data_dir.join("camera_poses.bin");
+    let poses = if poses_path.exists() {
+        println!("Loading camera poses from {}", poses_path.display());
+        Some(load_camera_poses(poses_path.to_str().unwrap())?)
+    } else {
+        println!("No camera_poses.bin found, GT flow disabled");
+        None
+    };
 
     // Initialize Rerun
     let rec = rr::RecordingStreamBuilder::new("odysseus_slam_frontend").spawn()?;
 
     println!("Rerun viewer spawned successfully");
 
-    // Find all stereo pairs
+    // Find all stereo pairs (new naming: ImageXXXX_L.jpg)
     let mut frame_numbers: Vec<u32> = Vec::new();
-    for entry in std::fs::read_dir(image_dir)? {
+    for entry in std::fs::read_dir(&image_dir)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.ends_with("_L.jpg") || name.ends_with("_L.png") {
-            if let Ok(num) = name[..4].parse::<u32>() {
-                frame_numbers.push(num);
+        if name.starts_with("Image") && name.ends_with("_L.jpg") {
+            // Extract frame number: Image0001_L.jpg -> 0001
+            if let Some(num_str) = name.strip_prefix("Image").and_then(|s| s.strip_suffix("_L.jpg")) {
+                if let Ok(num) = num_str.parse::<u32>() {
+                    frame_numbers.push(num);
+                }
             }
         }
     }
@@ -60,26 +110,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut tracker = Tracker::with_config(config);
 
-    // Track feature history for visualization (id -> list of (left_pos, right_pos option))
-    let mut track_history: HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>> = HashMap::new();
+    // Track feature history for visualization (id -> list of (frame_idx, left_pos, right_pos option))
+    let mut track_history: HashMap<usize, Vec<(usize, (f32, f32), Option<(f32, f32)>)>> = HashMap::new();
+
+    // GT track storage: track_id -> (initial_frame_idx, 3D point in world coordinates, list of projected 2D positions)
+    // We store the 3D point in world coords so we can reproject it into each frame
+    let mut gt_tracks: HashMap<usize, (usize, Vec3<f64>, Vec<(f32, f32)>)> = HashMap::new();
+
+    // Camera intrinsics - 1024x1024 image with 90 deg FOV
+    // fx = fy = width / (2 * tan(fov/2)) = 1024 / (2 * tan(45deg)) = 1024 / 2 = 512
+    let intrinsics = CameraIntrinsics {
+        fx: 512.0,
+        fy: 512.0,
+        cx: 512.0,
+        cy: 512.0,
+    };
+
+    // Flow error accumulator
+    let mut flow_errors: Vec<f64> = Vec::new();
 
     // Process each frame
     let total_frames = frame_numbers.len();
     for (i, &frame_num) in frame_numbers.iter().enumerate() {
-        let left_path = image_dir.join(format!("{:04}_L.jpg", frame_num));
-        let right_path = image_dir.join(format!("{:04}_R.jpg", frame_num));
-
-        // Try .png if .jpg doesn't exist
-        let left_path = if left_path.exists() {
-            left_path
-        } else {
-            image_dir.join(format!("{:04}_L.png", frame_num))
-        };
-        let right_path = if right_path.exists() {
-            right_path
-        } else {
-            image_dir.join(format!("{:04}_R.png", frame_num))
-        };
+        let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
+        let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
+        let depth_path = image_dir.join(format!("depth{:04}_L.exr", frame_num));
 
         println!(
             "Frame {}/{}: {}",
@@ -96,10 +151,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let right_gray: GrayImage = right_img.to_luma8();
         let (width, height) = left_gray.dimensions();
 
+        // Load depth map if available
+        let depth_map = if depth_path.exists() {
+            match load_exr_depth(&depth_path) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    eprintln!("  Warning: Failed to load depth: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Process frame
         let start = std::time::Instant::now();
         let tracks = tracker.process_frame(&left_gray, &right_gray);
         let process_time = start.elapsed();
+
+        // Update GT tracks and compute errors
+        if let (Some(ref poses), Some(ref curr_depth)) = (&poses, &depth_map) {
+            if i < poses.len() {
+                let curr_pose = &poses[i];
+
+                // Initialize GT tracks for new features (age == 0 means just detected)
+                for track in &tracks {
+                    if track.age == 0 && !gt_tracks.contains_key(&track.id) {
+                        // Get depth at feature location
+                        let px = track.stereo.left_kp.x.round() as usize;
+                        let py = track.stereo.left_kp.y.round() as usize;
+                        if py < curr_depth.len() && px < curr_depth[0].len() {
+                            let depth = curr_depth[py][px] as f64;
+                            if depth > 0.0 && depth < 100.0 {
+                                // Unproject to 3D in camera frame
+                                let p3d_cam = intrinsics.unproject(
+                                    track.stereo.left_kp.x as f64,
+                                    track.stereo.left_kp.y as f64,
+                                    depth,
+                                );
+                                // Transform to world coordinates
+                                // Try: poses are camera-to-world, so apply directly
+                                let p3d_world = curr_pose.transform_point(p3d_cam);
+
+                                // Store initial position
+                                let init_pos = (track.stereo.left_kp.x, track.stereo.left_kp.y);
+                                gt_tracks.insert(track.id, (i, p3d_world, vec![init_pos]));
+                            }
+                        }
+                    }
+                }
+
+                // Update all GT tracks by reprojecting into current frame
+                let active_track_ids: std::collections::HashSet<usize> =
+                    tracks.iter().map(|t| t.id).collect();
+
+                for (track_id, (_, p3d_world, positions)) in gt_tracks.iter_mut() {
+                    // Only update if this track is still active
+                    if active_track_ids.contains(track_id) {
+                        // Transform world point to current camera frame
+                        // Try: poses are camera-to-world, so use inverse to go world-to-camera
+                        let p3d_cam = curr_pose.inverse().transform_point(*p3d_world);
+
+                        // Project to 2D
+                        if let Some((u, v)) = intrinsics.project(&p3d_cam) {
+                            if u >= 0.0 && u < width as f64 && v >= 0.0 && v < height as f64 {
+                                positions.push((u as f32, v as f32));
+                            }
+                        }
+                    }
+                }
+
+                // Compute flow errors comparing tracked positions to GT positions
+                for track in &tracks {
+                    if let Some((_, _, gt_positions)) = gt_tracks.get(&track.id) {
+                        if gt_positions.len() >= 2 {
+                            let gt_curr = gt_positions.last().unwrap();
+                            let tracked_curr = (track.stereo.left_kp.x, track.stereo.left_kp.y);
+                            let error = ((gt_curr.0 - tracked_curr.0).powi(2)
+                                       + (gt_curr.1 - tracked_curr.1).powi(2)).sqrt() as f64;
+                            flow_errors.push(error);
+                        }
+                    }
+                }
+            }
+        }
 
         // Update track history
         for track in &tracks {
@@ -112,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             track_history
                 .entry(track.id)
                 .or_default()
-                .push((left_pos, right_pos));
+                .push((i, left_pos, right_pos));
         }
 
         // Set timeline
@@ -144,6 +279,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Log disparity statistics
         log_disparity_info(&rec, "stats/disparity", &tracks)?;
+
+        // Log GT trajectories alongside tracked trajectories
+        log_gt_trajectories(&rec, "stereo_view/gt_tracks", &tracks, &gt_tracks)?;
 
         // Print statistics
         let with_stereo = tracks.iter().filter(|t| t.age == 0).count();
@@ -182,7 +320,112 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  >= 40 frames: {:4} ({:5.1}%)", above_40, 100.0 * above_40 as f32 / total_tracks as f32);
     }
 
+    // Print flow accuracy statistics
+    if !flow_errors.is_empty() {
+        flow_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean_error: f64 = flow_errors.iter().sum::<f64>() / flow_errors.len() as f64;
+        let median_error = flow_errors[flow_errors.len() / 2];
+        let p90_error = flow_errors[(flow_errors.len() as f64 * 0.9) as usize];
+        let p99_error = flow_errors[(flow_errors.len() as f64 * 0.99).min(flow_errors.len() as f64 - 1.0) as usize];
+
+        println!();
+        println!("=== Flow Accuracy (vs Ground Truth) ===");
+        println!("Measurements: {}", flow_errors.len());
+        println!("Mean error:   {:.2} pixels", mean_error);
+        println!("Median error: {:.2} pixels", median_error);
+        println!("90th %%ile:   {:.2} pixels", p90_error);
+        println!("99th %%ile:   {:.2} pixels", p99_error);
+    }
+
     println!("\nRerun visualization active. Close the viewer to exit.");
+
+    Ok(())
+}
+
+/// Load depth map from EXR file
+/// Blender exports depth as a single channel named "Depth.V"
+fn load_exr_depth(path: &Path) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    use exr::prelude::*;
+
+    // Read all channels from the first layer
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(path)?;
+
+    let layer = &image.layer_data;
+    let size = image.layer_data.size;
+    let width = size.width();
+    let height = size.height();
+
+    // Find the depth channel (Blender names it "Depth.V")
+    // Just use the first channel since we know there's only one
+    let depth_channel = layer
+        .channel_data
+        .list
+        .first()
+        .ok_or("No depth channel found in EXR")?;
+
+    // Extract pixel values
+    let mut depth_map = vec![vec![0.0f32; width]; height];
+    match &depth_channel.sample_data {
+        FlatSamples::F32(samples) => {
+            for y in 0..height {
+                for x in 0..width {
+                    depth_map[y][x] = samples[y * width + x];
+                }
+            }
+        }
+        FlatSamples::F16(samples) => {
+            for y in 0..height {
+                for x in 0..width {
+                    depth_map[y][x] = samples[y * width + x].to_f32();
+                }
+            }
+        }
+        FlatSamples::U32(samples) => {
+            for y in 0..height {
+                for x in 0..width {
+                    depth_map[y][x] = samples[y * width + x] as f32;
+                }
+            }
+        }
+    }
+
+    Ok(depth_map)
+}
+
+/// Log GT trajectories as cyan lines alongside the tracked trajectories
+/// GT tracks show where the 3D point *should* project based on camera poses
+fn log_gt_trajectories(
+    rec: &rr::RecordingStream,
+    path: &str,
+    tracks: &[TrackedFeature],
+    gt_tracks: &HashMap<usize, (usize, Vec3<f64>, Vec<(f32, f32)>)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut gt_strips: Vec<Vec<[f32; 2]>> = Vec::new();
+
+    // Only show GT tracks for currently active features
+    for track in tracks {
+        if let Some((_, _, positions)) = gt_tracks.get(&track.id) {
+            if positions.len() >= 2 {
+                let strip: Vec<[f32; 2]> = positions.iter().map(|p| [p.0, p.1]).collect();
+                gt_strips.push(strip);
+            }
+        }
+    }
+
+    if !gt_strips.is_empty() {
+        rec.log(
+            path,
+            &rr::LineStrips2D::new(gt_strips)
+                .with_colors(vec![[0u8, 255, 255]]) // Cyan for GT
+                .with_radii(vec![2.0]),
+        )?;
+    }
 
     Ok(())
 }
@@ -215,7 +458,7 @@ fn log_keypoints(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    history: &HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>>,
+    history: &HashMap<usize, Vec<(usize, (f32, f32), Option<(f32, f32)>)>>,
     view_idx: u32,
     image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -330,7 +573,7 @@ fn log_track_trajectories(
     rec: &rr::RecordingStream,
     path: &str,
     tracks: &[TrackedFeature],
-    history: &HashMap<usize, Vec<((f32, f32), Option<(f32, f32)>)>>,
+    history: &HashMap<usize, Vec<(usize, (f32, f32), Option<(f32, f32)>)>>,
     view_idx: u32,
     image_width: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -343,7 +586,7 @@ fn log_track_trajectories(
             // Extract positions for this view
             let view_positions: Vec<[f32; 2]> = positions
                 .iter()
-                .filter_map(|(left, right)| {
+                .filter_map(|(_, left, right)| {
                     if view_idx == 0 {
                         Some([left.0 + x_offset, left.1])
                     } else {
@@ -416,3 +659,4 @@ fn track_age_color(length: usize) -> [u8; 3] {
     let g = (norm * 255.0) as u8;
     [r, g, 100]
 }
+
