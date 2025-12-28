@@ -45,3 +45,7 @@ We have ANOTHER layer of linearization. Yes, ANOTHER. In our code, before the co
 * then compute the FUCKING JACOBIAN FOR THAT. Function inputs are biases, function outputs are relative pose. That jacobian.
 * Then, in the optimizer, we let the IMU biases float, and then our "pseudo observation" here is WE START AT THE LINEARIZATION POINT OF THE PREINTEGRATION, MOVE ALONG THE BIAS AXES, AND USE THE JACOBIAN TO COME UP WITH A SMALL DELTA FROM THE LINEARIZATION POINT. THEN WE JUST USE ( CURRENT CAMERA POSE - (LAST CAMERA POSE * PREINTEGRATION RESULT) ) as an observation
     * Note I said nothing about how the variance on this observation is computed.
+
+
+Useful links:
+https://www.tangramvision.com/blog/imu-preintegration-basics-part-5-of-5
