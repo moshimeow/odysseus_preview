@@ -3,6 +3,188 @@
 use odysseus_solver::math3d::Vec3;
 use odysseus_solver::Real;
 
+/// Kannala-Brandt fisheye camera model (KB4)
+///
+/// A fisheye projection model that handles wide-angle lenses.
+/// Uses the equidistant projection with polynomial distortion:
+///   θ_d = θ + k1*θ³ + k2*θ⁵ + k3*θ⁷ + k4*θ⁹
+/// where θ = atan2(r, z) is the angle from the optical axis.
+///
+/// This model is used in ORB-SLAM3 and handles up to 180° FOV.
+#[derive(Debug, Clone, Copy)]
+pub struct KannalaBrandtCamera<T> {
+    /// Focal length in x direction (pixels)
+    pub fx: T,
+    /// Focal length in y direction (pixels)
+    pub fy: T,
+    /// Principal point x coordinate (pixels)
+    pub cx: T,
+    /// Principal point y coordinate (pixels)
+    pub cy: T,
+    /// Distortion coefficient k1
+    pub k1: T,
+    /// Distortion coefficient k2
+    pub k2: T,
+    /// Distortion coefficient k3
+    pub k3: T,
+    /// Distortion coefficient k4
+    pub k4: T,
+}
+
+impl<T: Real> KannalaBrandtCamera<T>
+where
+    T::Scalar: PartialOrd<f64>,
+{
+    /// Create a new Kannala-Brandt camera
+    pub fn new(fx: T, fy: T, cx: T, cy: T, k1: T, k2: T, k3: T, k4: T) -> Self {
+        Self { fx, fy, cx, cy, k1, k2, k3, k4 }
+    }
+
+    /// Create a camera with no distortion (equivalent to equidistant projection)
+    pub fn no_distortion(fx: T, fy: T, cx: T, cy: T) -> Self {
+        Self::new(fx, fy, cx, cy, T::zero(), T::zero(), T::zero(), T::zero())
+    }
+
+    /// Apply the distortion polynomial: θ_d = θ + k1*θ³ + k2*θ⁵ + k3*θ⁷ + k4*θ⁹
+    fn distort_theta(&self, theta: T) -> T {
+        let theta2 = theta * theta;
+        let theta3 = theta2 * theta;
+        let theta5 = theta3 * theta2;
+        let theta7 = theta5 * theta2;
+        let theta9 = theta7 * theta2;
+
+        theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9
+    }
+
+    /// Derivative of distortion polynomial: d(θ_d)/d(θ) = 1 + 3*k1*θ² + 5*k2*θ⁴ + 7*k3*θ⁶ + 9*k4*θ⁸
+    fn distort_theta_derivative(&self, theta: T) -> T {
+        let theta2 = theta * theta;
+        let theta4 = theta2 * theta2;
+        let theta6 = theta4 * theta2;
+        let theta8 = theta6 * theta2;
+
+        T::one()
+            + T::from_literal(3.0) * self.k1 * theta2
+            + T::from_literal(5.0) * self.k2 * theta4
+            + T::from_literal(7.0) * self.k3 * theta6
+            + T::from_literal(9.0) * self.k4 * theta8
+    }
+
+    /// Project a 3D point in camera coordinates to 2D image coordinates
+    ///
+    /// # Arguments
+    /// * `point_cam` - 3D point in camera frame [X, Y, Z]
+    ///
+    /// # Returns
+    /// * 2D pixel coordinates [u, v]
+    pub fn project(&self, point_cam: Vec3<T>) -> (T, T) {
+        let x = point_cam.x;
+        let y = point_cam.y;
+        let z = point_cam.z;
+
+        // Radius in XY plane
+        let r_sq = x * x + y * y;
+        let r = r_sq.sqrt();
+
+        // Handle point on or very close to optical axis
+        // Use scalar() for branching only
+        if r.scalar() < 1e-10 {
+            // Point on optical axis projects to principal point
+            return (self.cx, self.cy);
+        }
+
+        // Angle from optical axis: theta = atan2(r, z)
+        // Use acos(z/norm) which gives the same result for r >= 0
+        let norm = (r_sq + z * z).sqrt();
+        let cos_theta = z / norm;
+        let theta = cos_theta.acos();
+
+        // Apply distortion to get θ_d
+        let theta_d = self.distort_theta(theta);
+
+        // Compute distorted normalized coordinates
+        // Direction is preserved, magnitude is θ_d
+        let scale = theta_d / r;
+        let x_d = x * scale;
+        let y_d = y * scale;
+
+        // Apply intrinsics
+        let u = self.fx * x_d + self.cx;
+        let v = self.fy * y_d + self.cy;
+
+        (u, v)
+    }
+
+    /// Unproject a 2D pixel to a 3D ray direction in camera coordinates
+    ///
+    /// Uses Newton-Raphson iteration to invert the distortion polynomial.
+    ///
+    /// # Arguments
+    /// * `u` - Pixel x coordinate
+    /// * `v` - Pixel y coordinate
+    ///
+    /// # Returns
+    /// * Unit vector representing the ray direction
+    pub fn unproject(&self, u: T, v: T) -> Vec3<T> {
+        // Remove intrinsics to get distorted normalized coordinates
+        let x_d = (u - self.cx) / self.fx;
+        let y_d = (v - self.cy) / self.fy;
+
+        // θ_d is the radius in distorted space
+        let theta_d = (x_d * x_d + y_d * y_d).sqrt();
+
+        // Handle point at principal point
+        if theta_d.scalar() < 1e-10 {
+            return Vec3::new(T::zero(), T::zero(), T::one());
+        }
+
+        // Solve for θ using Newton-Raphson
+        // We need to find θ such that distort_theta(θ) = θ_d
+        let mut theta = theta_d; // Initial guess
+
+        for _ in 0..10 {
+            let f = self.distort_theta(theta) - theta_d;
+            let df = self.distort_theta_derivative(theta);
+            let delta = f / df;
+            theta = theta - delta;
+
+            if delta.abs().scalar() < 1e-12 {
+                break;
+            }
+        }
+
+        // Compute the 3D ray direction
+        // The ray lies in the plane containing the optical axis and (x_d, y_d)
+        // with angle θ from the optical axis
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        // Direction in distorted space (normalized)
+        let inv_theta_d = T::one() / theta_d;
+        let dir_x = x_d * inv_theta_d;
+        let dir_y = y_d * inv_theta_d;
+
+        // Scale by sin(θ) for XY, use cos(θ) for Z
+        Vec3::new(dir_x * sin_theta, dir_y * sin_theta, cos_theta)
+    }
+
+    /// Unproject and scale by depth
+    ///
+    /// # Arguments
+    /// * `u` - Pixel x coordinate
+    /// * `v` - Pixel y coordinate
+    /// * `depth` - Depth value (distance along Z axis, not along ray)
+    ///
+    /// # Returns
+    /// * 3D point at the given Z depth
+    pub fn unproject_with_depth(&self, u: T, v: T, depth: T) -> Vec3<T> {
+        let ray = self.unproject(u, v);
+        // Scale ray so that z = depth
+        let scale = depth / ray.z;
+        Vec3::new(ray.x * scale, ray.y * scale, depth)
+    }
+}
+
 /// Pinhole camera model with intrinsic parameters
 ///
 /// Represents a simple pinhole camera with focal lengths and principal point.
@@ -230,5 +412,121 @@ mod tests {
         // v = 400 * (3/4) + 240 = 300 + 240 = 540
         assert_abs_diff_eq!(u, 620.0, epsilon = 1e-10);
         assert_abs_diff_eq!(v, 540.0, epsilon = 1e-10);
+    }
+
+    // Kannala-Brandt camera tests
+
+    #[test]
+    fn test_kb_project_center() {
+        // Point on optical axis should project to principal point
+        let camera = KannalaBrandtCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, -0.05, 0.01, -0.005);
+        let point = Vec3::new(0.0, 0.0, 1.0);
+        let (u, v) = camera.project(point);
+
+        assert_abs_diff_eq!(u, 320.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(v, 240.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_kb_no_distortion_matches_equidistant() {
+        // With no distortion, KB model reduces to equidistant projection
+        let camera = KannalaBrandtCamera::no_distortion(500.0, 500.0, 320.0, 240.0);
+        let point = Vec3::new(1.0, 0.0, 1.0);
+
+        let (u, _v) = camera.project(point);
+
+        // For equidistant: θ = atan2(1, 1) = π/4
+        // x_d = θ * (x/r) = π/4 * 1 = π/4
+        // u = 500 * π/4 + 320
+        let expected_u = 500.0 * std::f64::consts::FRAC_PI_4 + 320.0;
+        assert_abs_diff_eq!(u, expected_u, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_kb_unproject_project_roundtrip() {
+        // Test with various distortion coefficients
+        let camera = KannalaBrandtCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, -0.05, 0.01, -0.005);
+
+        // Test multiple points at different angles
+        let test_points = [
+            Vec3::new(0.5, 0.3, 2.0),
+            Vec3::new(-1.0, 0.5, 1.5),
+            Vec3::new(0.2, -0.8, 3.0),
+            Vec3::new(1.0, 1.0, 1.0), // 45 degree angle
+        ];
+
+        for original in test_points {
+            let (u, v) = camera.project(original);
+            let reconstructed = camera.unproject_with_depth(u, v, original.z);
+
+            assert_abs_diff_eq!(reconstructed.x, original.x, epsilon = 1e-8);
+            assert_abs_diff_eq!(reconstructed.y, original.y, epsilon = 1e-8);
+            assert_abs_diff_eq!(reconstructed.z, original.z, epsilon = 1e-8);
+        }
+    }
+
+    #[test]
+    fn test_kb_unproject_returns_unit_vector() {
+        let camera = KannalaBrandtCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, -0.05, 0.01, -0.005);
+
+        let ray = camera.unproject(400.0, 300.0);
+        let norm = (ray.x * ray.x + ray.y * ray.y + ray.z * ray.z).sqrt();
+
+        assert_abs_diff_eq!(norm, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_kb_with_autodiff() {
+        use odysseus_solver::Jet;
+
+        type Jet3 = Jet<f64, 3>;
+
+        let camera = KannalaBrandtCamera::new(
+            Jet3::constant(500.0),
+            Jet3::constant(500.0),
+            Jet3::constant(320.0),
+            Jet3::constant(240.0),
+            Jet3::constant(0.1),
+            Jet3::constant(-0.05),
+            Jet3::constant(0.01),
+            Jet3::constant(-0.005),
+        );
+
+        let point = Vec3::new(
+            Jet3::variable(1.0, 0),
+            Jet3::variable(0.5, 1),
+            Jet3::variable(2.0, 2),
+        );
+
+        let (u, v) = camera.project(point);
+
+        // Check that we have non-zero derivatives
+        assert!(u.derivs.iter().any(|&d| d.abs() > 1e-10));
+        assert!(v.derivs.iter().any(|&d| d.abs() > 1e-10));
+
+        // u should depend on x and z, but not y
+        assert!(u.derivs[0].abs() > 1e-10); // du/dx
+        assert!(u.derivs[2].abs() > 1e-10); // du/dz
+
+        // v should depend on y and z, but not x
+        assert!(v.derivs[1].abs() > 1e-10); // dv/dy
+        assert!(v.derivs[2].abs() > 1e-10); // dv/dz
+    }
+
+    #[test]
+    fn test_kb_wide_angle() {
+        // Test at wide angles (fisheye behavior)
+        let camera = KannalaBrandtCamera::no_distortion(500.0, 500.0, 320.0, 240.0);
+
+        // Point at 60 degrees from optical axis
+        let theta = std::f64::consts::FRAC_PI_3; // 60 degrees
+        let point = Vec3::new(theta.sin(), 0.0, theta.cos());
+
+        let (u, v) = camera.project(point);
+        let ray = camera.unproject(u, v);
+
+        // Verify the angle is preserved
+        let reconstructed_theta = ray.z.acos();
+        assert_abs_diff_eq!(reconstructed_theta, theta, epsilon = 1e-10);
     }
 }
