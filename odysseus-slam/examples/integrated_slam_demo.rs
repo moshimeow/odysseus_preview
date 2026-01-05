@@ -3,13 +3,19 @@
 //! Combines the visual frontend (feature tracking) with the backend (bundle adjustment)
 //! to run SLAM on real stereo image sequences.
 //!
+//! DIAGNOSTIC MODE: If room_mesh.bin exists in the data directory, the demo will
+//! automatically use synthetic observations instead of the visual frontend. This
+//! allows isolating backend performance from frontend tracking errors.
+//!
 //! Usage:
 //!   cd odysseus-slam
 //!   cargo run --release --example integrated_slam_demo -- <data_dir>
+//!   cargo run --release --example integrated_slam_demo -- <data_dir> --noise 2.0
 //!
 //! Expected data structure:
 //!   <data_dir>/images/Image{:04}_L.jpg, Image{:04}_R.jpg
 //!   <data_dir>/camera_poses.bin (ground truth, optional)
+//!   <data_dir>/room_mesh.bin (optional, enables diagnostic mode)
 
 use backtrace_on_stack_overflow;
 use clap::Parser;
@@ -19,7 +25,8 @@ use odysseus_slam::{
     geometry::StereoObservation,
     math::SE3,
     optimization::{run_bundle_adjustment, BundleAdjustmentConfig, MarginalizedPrior},
-    utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses},
+    simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
+    utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud_vec3},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
     SlamSystem, WorldState,
 };
@@ -45,6 +52,10 @@ struct Args {
     /// Focal length in pixels (for 90° FOV on 1024 image: 512)
     #[arg(long, default_value_t = 512.0)]
     focal_length: f64,
+
+    /// Observation noise stddev in pixels (for synthetic observations from mesh)
+    #[arg(long, default_value_t = 2.0)]
+    noise: f64,
 }
 
 // SLAM parameters
@@ -268,109 +279,211 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Find stereo pairs
-    let frame_numbers = find_stereo_pairs(&image_dir)?;
-    if frame_numbers.is_empty() {
-        return Err("No stereo pairs found in images directory".into());
+    // Check for diagnostic mode: if room_mesh.bin exists, use synthetic observations
+    let mesh_path = data_dir.join("room_mesh.bin");
+    let use_synthetic_observations = mesh_path.exists();
+
+    if use_synthetic_observations {
+        println!("🔬 DIAGNOSTIC MODE: room_mesh.bin detected");
+        println!("   Using synthetic observations instead of visual frontend\n");
     }
-    let total_frames = frame_numbers.len();
-    println!("📹 Found {} stereo image pairs\n", total_frames);
 
-    // Load all depth maps upfront for performance benchmarking
-    let depth_maps = load_all_depth_maps(&image_dir, &frame_numbers);
-
-    // Pre-run tracker to determine which features will be tracked
-    println!("🔍 Pre-running tracker to determine tracked features...");
-    let config = TrackerConfig {
-        min_features: 150,
-        max_features: 400,
-        ..Default::default()
+    // Determine frame count - use poses as source of truth
+    let total_frames = if let Some(ref poses) = gt_poses {
+        poses.len()
+    } else if use_synthetic_observations {
+        return Err("Diagnostic mode requires camera_poses.bin".into());
+    } else {
+        // Fall back to counting images if no GT poses
+        let numbers = find_stereo_pairs(&image_dir)?;
+        if numbers.is_empty() {
+            return Err("No stereo pairs found in images directory".into());
+        }
+        numbers.len()
     };
-    let mut pre_tracker = Tracker::with_config(config.clone());
 
-    // Track through all frames to build GT point map
-    let mut gt_points_map: HashMap<usize, Vec3<f64>> = HashMap::new();
-    for (i, &frame_num) in frame_numbers.iter().enumerate() {
-        let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
-        let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
+    // Frame numbers are just sequential indices
+    let frame_numbers: Vec<u32> = (0..total_frames as u32).collect();
 
-        let left_img = image::open(&left_path)?.to_luma8();
-        let right_img = image::open(&right_path)?.to_luma8();
+    if use_synthetic_observations {
+        println!("📹 Using {} frames from camera poses\n", total_frames);
+    } else {
+        println!("📹 Processing {} frames\n", total_frames);
+    }
 
-        let tracks = pre_tracker.process_frame(&left_img, &right_img);
-        let frame_obs = features_to_observations(&tracks, i);
+    // Generate observations and ground truth points based on mode
+    let (mut frame_observations_arc, gt_points_vec): (Arc<Vec<Vec<StereoObservation>>>, Vec<Vec3<f64>>);
 
-        // Build GT points for tracked features using cached depth map
-        if let Some(ref depth_map) = depth_maps[i] {
-            let pose = gt_poses.as_ref()
-                .and_then(|p| p.get(i))
-                .cloned()
-                .unwrap_or_else(SE3::identity);
+    if use_synthetic_observations {
+        // DIAGNOSTIC MODE: Generate synthetic observations from mesh
+        println!("🔍 Generating synthetic observations from mesh...");
 
-            for obs in &frame_obs {
-                if !gt_points_map.contains_key(&obs.point_id) {
-                    let x = obs.left_u as usize;
-                    let y = obs.left_v as usize;
-                    if y < depth_map.len() && x < depth_map[0].len() {
-                        let depth = depth_map[y][x];
-                        if depth > 0.0 && depth.is_finite() {
-                            let gt_point = pixel_to_world_point(
-                                obs.left_u,
-                                obs.left_v,
-                                depth,
-                                &pose,
-                                &stereo_camera,
-                            );
-                            gt_points_map.insert(obs.point_id, gt_point);
+        if gt_poses.is_none() {
+            return Err("Synthetic observation mode requires camera_poses.bin".into());
+        }
+
+        let gt_points = load_point_cloud_vec3(mesh_path.to_str().unwrap())?;
+        println!("  Loaded {} 3D points from mesh", gt_points.len());
+
+        let perfect_observations = generate_stereo_observations(
+            &gt_points,
+            gt_poses.as_ref().unwrap(),
+            &stereo_camera,
+            image_width,
+            image_height,
+        );
+
+        let observations = if args.noise > 0.0 {
+            println!("  Adding noise with stddev = {} pixels", args.noise);
+            add_noise_to_stereo_observations(&perfect_observations, args.noise, 123)
+        } else {
+            println!("  Using perfect observations (no noise)");
+            perfect_observations
+        };
+
+        let frame_obs: Vec<Vec<StereoObservation>> = (0..total_frames)
+            .map(|frame_idx| {
+                observations
+                    .iter()
+                    .filter(|obs| obs.camera_id == frame_idx)
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+
+        println!("  Generated {} total observations\n", observations.len());
+
+        frame_observations_arc = Arc::new(frame_obs);
+        gt_points_vec = gt_points;
+
+    } else {
+        // TRACKER MODE: Use visual frontend with depth maps for ground truth
+        println!("📷 TRACKER MODE: Using visual frontend");
+        println!("   Loading depth maps for ground truth points...\n");
+
+        let depth_maps = load_all_depth_maps(&image_dir, &frame_numbers);
+
+        // Pre-run tracker to determine which features will be tracked
+        println!("🔍 Pre-running tracker to determine tracked features...");
+        let config = TrackerConfig {
+            min_features: 150,
+            max_features: 400,
+            ..Default::default()
+        };
+        let mut pre_tracker = Tracker::with_config(config.clone());
+
+        // Track through all frames to build GT point map
+        let mut gt_points_map: HashMap<usize, Vec3<f64>> = HashMap::new();
+        for (i, &frame_num) in frame_numbers.iter().enumerate() {
+            let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
+            let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
+
+            let left_img = image::open(&left_path)?.to_luma8();
+            let right_img = image::open(&right_path)?.to_luma8();
+
+            let tracks = pre_tracker.process_frame(&left_img, &right_img);
+            let frame_obs = features_to_observations(&tracks, i);
+
+            // Build GT points for tracked features using cached depth map
+            if let Some(ref depth_map) = depth_maps[i] {
+                let pose = gt_poses.as_ref()
+                    .and_then(|p| p.get(i))
+                    .cloned()
+                    .unwrap_or_else(SE3::identity);
+
+                for obs in &frame_obs {
+                    if !gt_points_map.contains_key(&obs.point_id) {
+                        let x = obs.left_u as usize;
+                        let y = obs.left_v as usize;
+                        if y < depth_map.len() && x < depth_map[0].len() {
+                            let depth = depth_map[y][x];
+                            if depth > 0.0 && depth.is_finite() {
+                                let gt_point = pixel_to_world_point(
+                                    obs.left_u,
+                                    obs.left_v,
+                                    depth,
+                                    &pose,
+                                    &stereo_camera,
+                                );
+                                gt_points_map.insert(obs.point_id, gt_point);
+                            }
                         }
                     }
                 }
             }
+
+            // Print progress every 5 frames
+            if (i + 1) % 5 == 0 || i + 1 == frame_numbers.len() {
+                println!(
+                    "  Progress: {}/{} frames, {} GT points so far",
+                    i + 1,
+                    frame_numbers.len(),
+                    gt_points_map.len()
+                );
+            }
+        }
+        println!("  Completed! Built {} ground truth points for tracked features\n", gt_points_map.len());
+
+        // Convert to vector for visualization
+        let mut points_vec: Vec<Vec3<f64>> = vec![Vec3::new(0.0, 0.0, 0.0); gt_points_map.len()];
+        for (&point_id, &point) in &gt_points_map {
+            if point_id < points_vec.len() {
+                points_vec[point_id] = point;
+            }
         }
 
-        // Print progress every 5 frames
-        if (i + 1) % 5 == 0 || i + 1 == frame_numbers.len() {
-            println!(
-                "  Progress: {}/{} frames, {} GT points so far",
-                i + 1,
-                frame_numbers.len(),
-                gt_points_map.len()
-            );
-        }
-    }
-    println!("  Completed! Built {} ground truth points for tracked features\n", gt_points_map.len());
+        gt_points_vec = points_vec;
 
-    // Convert to vector for visualization
-    let mut gt_points_vec: Vec<Vec3<f64>> = vec![Vec3::new(0.0, 0.0, 0.0); gt_points_map.len()];
-    for (&point_id, &point) in &gt_points_map {
-        if point_id < gt_points_vec.len() {
-            gt_points_vec[point_id] = point;
-        }
-    }
+        // In tracker mode, observations will be generated frame-by-frame
+        // Create a placeholder that will be populated in the main loop
+        frame_observations_arc = Arc::new(Vec::new());
 
-    // Create tracker for actual SLAM run
-    let mut tracker = Tracker::with_config(config);
-    println!("🔍 Tracker initialized for SLAM (min: 150, max: 400 features)\n");
+        println!("🔍 Tracker initialized for SLAM (min: 150, max: 400 features)\n");
+    } // End of tracker mode else block
 
     // Create WorldState and FrameGraph
     let mut world = WorldState::new();
     let mut frame_graph = FrameGraph::new();
 
-    // Storage for observations (needed for GBA thread and LBA)
+    // Storage for observations (needed for GBA thread and LBA in tracker mode)
     let mut all_observations: Vec<Vec<StereoObservation>> = Vec::new();
+
+    // Initialize tracker for main loop if in tracker mode
+    let mut tracker_opt = if use_synthetic_observations {
+        None
+    } else {
+        let config = TrackerConfig {
+            min_features: 150,
+            max_features: 400,
+            ..Default::default()
+        };
+        Some(Tracker::with_config(config))
+    };
 
     // Process first frame to initialize
     println!("🚀 Processing frame 0 for initialization...");
-    let first_frame_num = frame_numbers[0];
-    let left_path = image_dir.join(format!("Image{:04}_L.jpg", first_frame_num));
-    let right_path = image_dir.join(format!("Image{:04}_R.jpg", first_frame_num));
 
-    let left_img = image::open(&left_path)?.to_luma8();
-    let right_img = image::open(&right_path)?.to_luma8();
+    let frame0_obs = if use_synthetic_observations {
+        // Get observations from pre-generated data
+        frame_observations_arc[0].clone()
+    } else {
+        // Use tracker to get observations
+        let first_frame_num = frame_numbers[0];
+        let left_path = image_dir.join(format!("Image{:04}_L.jpg", first_frame_num));
+        let right_path = image_dir.join(format!("Image{:04}_R.jpg", first_frame_num));
 
-    let tracks = tracker.process_frame(&left_img, &right_img);
-    let frame0_obs = features_to_observations(&tracks, 0);
-    println!("  Frame 0: {} tracks, {} with stereo", tracks.len(), frame0_obs.len());
+        let left_img = image::open(&left_path)?.to_luma8();
+        let right_img = image::open(&right_path)?.to_luma8();
+
+        let tracks = tracker_opt.as_mut().unwrap().process_frame(&left_img, &right_img);
+        let obs = features_to_observations(&tracks, 0);
+        println!("  Frame 0: {} tracks, {} with stereo", tracks.len(), obs.len());
+        obs
+    };
+
+    if use_synthetic_observations {
+        println!("  Frame 0: {} observations from synthetic data", frame0_obs.len());
+    }
 
     // Initialize with ground truth pose if available, otherwise identity
     let initial_pose = gt_poses
@@ -385,7 +498,13 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     for obs in &frame0_obs {
         world.triangulate_and_add_point(obs, &stereo_camera, 0);
     }
-    all_observations.push(frame0_obs.clone());
+
+    // In tracker mode, we need to build all_observations incrementally and update frame_observations_arc
+    // In synthetic mode, frame_observations_arc is already fully populated
+    if !use_synthetic_observations {
+        all_observations.push(frame0_obs.clone());
+        frame_observations_arc = Arc::new(all_observations.clone());
+    }
 
     println!(
         "  Initialized {} points from triangulation\n",
@@ -393,8 +512,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create SLAM system (spawns GBA thread)
-    let frame_observations_arc = Arc::new(all_observations.clone());
-    let mut slam_system = SlamSystem::new(stereo_camera.clone(), frame_observations_arc);
+    let mut slam_system = SlamSystem::new(stereo_camera.clone(), frame_observations_arc.clone());
 
     // Visualize ground truth trajectory and tracked feature points
     if let Some(ref poses) = gt_poses {
@@ -477,16 +595,21 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Load images
-        let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
-        let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
+        // Get observations for current frame
+        let current_frame_obs = if use_synthetic_observations {
+            // Use pre-generated observations
+            frame_observations_arc[frame_idx].clone()
+        } else {
+            // Load images and track features
+            let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
+            let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
 
-        let left_img = image::open(&left_path)?.to_luma8();
-        let right_img = image::open(&right_path)?.to_luma8();
+            let left_img = image::open(&left_path)?.to_luma8();
+            let right_img = image::open(&right_path)?.to_luma8();
 
-        // Track features
-        let tracks = tracker.process_frame(&left_img, &right_img);
-        let current_frame_obs = features_to_observations(&tracks, frame_idx);
+            let tracks = tracker_opt.as_mut().unwrap().process_frame(&left_img, &right_img);
+            features_to_observations(&tracks, frame_idx)
+        };
 
         // Get last pose for initialization
         let last_pose = world.get_pose(frame_idx - 1).unwrap();
@@ -542,8 +665,10 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             last_keyframe_position = current_position;
         }
 
-        // Store observations
-        all_observations.push(current_frame_obs.clone());
+        // Store observations (only needed in tracker mode for incremental updates)
+        if !use_synthetic_observations {
+            all_observations.push(current_frame_obs.clone());
+        }
 
         // Add frame to graph
         frame_graph.add_frame(frame_role, OptimizationState::Optimized);
@@ -592,14 +717,20 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
 
         // Update observations arc for LBA
-        let frame_observations_arc = Arc::new(all_observations.clone());
+        // In synthetic mode, use the pre-generated observations
+        // In tracker mode, create from incrementally built all_observations
+        let lba_frame_observations_arc = if use_synthetic_observations {
+            frame_observations_arc.clone()
+        } else {
+            Arc::new(all_observations.clone())
+        };
 
         // Run LBA
         let result = run_bundle_adjustment(
             &stereo_camera,
             &frame_graph,
             &mut world,
-            &frame_observations_arc,
+            &lba_frame_observations_arc,
             marginalized_prior.as_ref(),
             &fixed_point_ids,
             &BundleAdjustmentConfig::lba(),
@@ -660,20 +791,34 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|s| s.state == OptimizationState::Fixed)
             .count();
 
-        let with_stereo = tracks.iter().filter(|t| t.age == 0).count();
-
-        println!(
-            "Frame {}: {} tracks ({} stereo), {} opt, {} fixed, Map: {} pts, LBA: {:.2}ms{}{}",
-            frame_idx,
-            tracks.len(),
-            with_stereo,
-            n_optimized,
-            n_fixed,
-            world.num_points(),
-            lba_time,
-            if should_create_keyframe { " [KF]" } else { "" },
-            error_str
-        );
+        // Print frame info
+        if use_synthetic_observations {
+            println!(
+                "Frame {}: {} obs, {} opt, {} fixed, Map: {} pts, LBA: {:.2}ms{}{}",
+                frame_idx,
+                current_frame_obs.len(),
+                n_optimized,
+                n_fixed,
+                world.num_points(),
+                lba_time,
+                if should_create_keyframe { " [KF]" } else { "" },
+                error_str
+            );
+        } else {
+            // In tracker mode, we don't have access to tracks here anymore
+            // Just print observations count
+            println!(
+                "Frame {}: {} obs, {} opt, {} fixed, Map: {} pts, LBA: {:.2}ms{}{}",
+                frame_idx,
+                current_frame_obs.len(),
+                n_optimized,
+                n_fixed,
+                world.num_points(),
+                lba_time,
+                if should_create_keyframe { " [KF]" } else { "" },
+                error_str
+            );
+        }
     }
 
     println!("\n✅ Processed {} frames", total_frames);
