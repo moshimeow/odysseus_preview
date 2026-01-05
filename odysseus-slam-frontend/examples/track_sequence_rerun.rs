@@ -290,9 +290,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Log keypoints on left side of composite (view_idx=0)
         log_keypoints(&rec, "stereo_view/left_keypoints", &tracks, &track_history, 0, width)?;
+        log_keypoint_labels(&rec, "stereo_view/left_keypoint_labels", &tracks, 0, width)?;
 
         // Log keypoints on right side of composite (view_idx=1)
         log_keypoints(&rec, "stereo_view/right_keypoints", &tracks, &track_history, 1, width)?;
+        log_keypoint_labels(&rec, "stereo_view/right_keypoint_labels", &tracks, 1, width)?;
 
         // Log stereo match lines (colored by inlier/outlier status)
         log_stereo_matches(&rec, "stereo_view/matches", &tracks, width)?;
@@ -495,7 +497,7 @@ fn create_side_by_side(left: &RgbImage, right: &RgbImage) -> RgbImage {
     composite
 }
 
-/// Log keypoints with labels
+/// Log keypoints without labels
 /// view_idx: 0 = left image, 1 = right image (offset by image_width)
 fn log_keypoints(
     rec: &rr::RecordingStream,
@@ -546,7 +548,51 @@ fn log_keypoints(
         .map(|t| if t.age == 0 { 6.0 } else { 4.0 })
         .collect();
 
-    // Labels showing track IDs
+    rec.log(
+        path,
+        &rr::Points2D::new(positions)
+            .with_colors(point_colors)
+            .with_radii(radii),
+    )?;
+
+    Ok(())
+}
+
+/// Log keypoint track ID labels as a separate entity
+/// view_idx: 0 = left image, 1 = right image (offset by image_width)
+fn log_keypoint_labels(
+    rec: &rr::RecordingStream,
+    path: &str,
+    tracks: &[TrackedFeature],
+    view_idx: u32,
+    image_width: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let x_offset = view_idx as f32 * image_width as f32;
+
+    // For right view, only show tracks with valid stereo matches
+    let filtered_tracks: Vec<_> = if view_idx == 0 {
+        tracks.iter().collect()
+    } else {
+        tracks.iter().filter(|t| t.age == 0).collect()
+    };
+
+    // Always log to clear stale data from previous frames
+    if filtered_tracks.is_empty() {
+        rec.log(path, &rr::Points2D::new(Vec::<[f32; 2]>::new()))?;
+        return Ok(());
+    }
+
+    let positions: Vec<[f32; 2]> = filtered_tracks
+        .iter()
+        .map(|t| {
+            if view_idx == 0 {
+                [t.stereo.left_kp.x + x_offset, t.stereo.left_kp.y]
+            } else {
+                [t.stereo.right_kp.x + x_offset, t.stereo.right_kp.y]
+            }
+        })
+        .collect();
+
     let labels: Vec<String> = filtered_tracks
         .iter()
         .map(|t| format!("{}", t.id))
@@ -555,8 +601,6 @@ fn log_keypoints(
     rec.log(
         path,
         &rr::Points2D::new(positions)
-            .with_colors(point_colors)
-            .with_radii(radii)
             .with_labels(labels)
             .with_show_labels(true),
     )?;
