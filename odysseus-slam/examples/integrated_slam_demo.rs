@@ -28,7 +28,7 @@ use odysseus_slam::{
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud_vec3},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
-    SlamSystem, WorldState,
+    SlamSystem, SlamSystemDynamic, WorldState,
 };
 use odysseus_slam_frontend::{TrackedFeature, Tracker, TrackerConfig};
 use odysseus_solver::math3d::Vec3;
@@ -521,7 +521,8 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create SLAM system (spawns GBA thread)
-    let mut slam_system = SlamSystem::new(stereo_camera.clone(), frame_observations_arc.clone());
+    // Use dynamic system which receives observations with each frame
+    let mut slam_system = SlamSystemDynamic::new(stereo_camera.clone());
 
     // Visualize ground truth trajectory and tracked feature points
     if let Some(ref poses) = gt_poses {
@@ -539,7 +540,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         None,
     )?;
 
-    slam_system.send_to_gba(0, &world);
+    slam_system.send_to_gba(0, &world, frame_observations_arc.clone());
 
     println!("📊 Memory before frame processing: {:.1} MB\n", get_rss_mb());
 
@@ -674,9 +675,13 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             last_keyframe_position = current_position;
         }
 
-        // Store observations (only needed in tracker mode for incremental updates)
+        // Store observations and update Arc
         if !use_synthetic_observations {
             all_observations.push(current_frame_obs.clone());
+            frame_observations_arc = Arc::new(all_observations.clone());
+        } else {
+            // In synthetic mode, ensure we have observations for this frame
+            // (frame_observations_arc already contains all frames)
         }
 
         // Add frame to graph
@@ -725,21 +730,12 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
 
-        // Update observations arc for LBA
-        // In synthetic mode, use the pre-generated observations
-        // In tracker mode, create from incrementally built all_observations
-        let lba_frame_observations_arc = if use_synthetic_observations {
-            frame_observations_arc.clone()
-        } else {
-            Arc::new(all_observations.clone())
-        };
-
-        // Run LBA
+        // Run LBA (frame_observations_arc is kept up to date above)
         let result = run_bundle_adjustment(
             &stereo_camera,
             &frame_graph,
             &mut world,
-            &lba_frame_observations_arc,
+            &frame_observations_arc,
             marginalized_prior.as_ref(),
             &fixed_point_ids,
             &BundleAdjustmentConfig::lba().with_graph_viz(true),
@@ -760,8 +756,8 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Send to GBA
-        slam_system.send_to_gba(frame_idx, &world);
+        // Send to GBA with updated observations
+        slam_system.send_to_gba(frame_idx, &world, frame_observations_arc.clone());
 
         // Compute pose error if GT available
         let optimized_pose = world.frames[frame_idx].world_pose();

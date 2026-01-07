@@ -11,6 +11,8 @@ more extensive frontend simulation
 
 steal basalt's klt tracking sampling strategy
 
+the optimizer needs to use expected point stdev to normalize the residuals (?)
+
 better metrics generally
 
 IMU integration
