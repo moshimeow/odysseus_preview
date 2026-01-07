@@ -1,9 +1,10 @@
 //! Lucas-Kanade optical flow tracker
 //!
 //! Implements pyramidal Lucas-Kanade for tracking features across frames.
-//! Uses iterative refinement with a local window.
+//! Uses Schnilbert solver with Jets for automatic differentiation.
 
 use image::GrayImage;
+use odysseus_solver::schnilbert::Schnilbert;
 
 use crate::KeyPoint;
 
@@ -41,6 +42,7 @@ impl Default for LKConfig {
 /// Lucas-Kanade optical flow tracker
 pub struct LKTracker {
     config: LKConfig,
+    solver: Schnilbert<f32, 2>,
 }
 
 /// Result of tracking a single point
@@ -57,14 +59,16 @@ pub struct TrackResult {
 impl LKTracker {
     /// Create a new LK tracker with default configuration
     pub fn new() -> Self {
-        Self {
-            config: LKConfig::default(),
-        }
+        Self::with_config(LKConfig::default())
     }
 
     /// Create a new LK tracker with custom configuration
     pub fn with_config(config: LKConfig) -> Self {
-        Self { config }
+        let solver = Schnilbert::<f32, 2>::new()
+            .with_max_iterations(config.max_iterations)
+            .with_step_threshold(config.epsilon);
+
+        Self { config, solver }
     }
 
     /// Track a set of points from prev_image to next_image
@@ -278,7 +282,16 @@ impl LKTracker {
         }
     }
 
-    /// Track at a single pyramid level using iterative Lucas-Kanade
+    /// Track at a single pyramid level using Schnilbert solver
+    ///
+    /// The LK tracking problem is: find (dx, dy) that minimizes
+    ///   sum_window (I(x,y) - J(x+dx, y+dy))^2
+    ///
+    /// This is a linearized problem where:
+    /// - Residual r_i = I(x_i, y_i) - J(x_i + dx, y_i + dy)
+    /// - Jacobian row = [-dJ/dx, -dJ/dy] ≈ [-dI/dx, -dI/dy] (using template gradients)
+    ///
+    /// We use solve_linearized since the Jacobian (image gradients) is constant.
     fn track_at_level(
         &self,
         prev_image: &GrayImage,
@@ -289,7 +302,7 @@ impl LKTracker {
         let (width, height) = prev_image.dimensions();
         let win = self.config.win_size as i32;
 
-        // Check bounds
+        // Check bounds for template extraction
         if prev_pt.0 < win as f32
             || prev_pt.1 < win as f32
             || prev_pt.0 >= (width as i32 - win) as f32
@@ -302,16 +315,11 @@ impl LKTracker {
             };
         }
 
-        // Compute image gradients and structure tensor in the window
-        let (gxx, gyy, gxy, grad_x, grad_y) =
-            self.compute_gradient_matrix(prev_image, prev_pt.0 as i32, prev_pt.1 as i32);
+        // Compute image gradients (this is the Jacobian)
+        // For residual r = I_prev - I_next, dr/d(dx) = -dI_next/dx ≈ -dI_prev/dx
+        let (jacobian, min_eig) = self.compute_jacobian(prev_image, prev_pt);
 
-        // Check minimum eigenvalue
-        let trace = gxx + gyy;
-        let det = gxx * gyy - gxy * gxy;
-        let discriminant = (trace * trace - 4.0 * det).max(0.0);
-        let min_eig = (trace - discriminant.sqrt()) / 2.0;
-
+        // Check minimum eigenvalue (trackability)
         if min_eig < self.config.min_eigenvalue {
             return TrackResult {
                 position: prev_pt,
@@ -320,79 +328,58 @@ impl LKTracker {
             };
         }
 
-        // Iterative refinement
-        let mut cur_pos = init_guess;
+        // Initial offset from prev_pt
+        let initial_offset = [init_guess.0 - prev_pt.0, init_guess.1 - prev_pt.1];
 
-        for _iter in 0..self.config.max_iterations {
-            // Check bounds for current guess
-            if cur_pos.0 < win as f32
-                || cur_pos.1 < win as f32
-                || cur_pos.0 >= (width as i32 - win) as f32
-                || cur_pos.1 >= (height as i32 - win) as f32
-            {
-                return TrackResult {
-                    position: prev_pt,
-                    success: false,
-                    error: f32::MAX,
-                };
-            }
+        // Create residual function that computes I_prev(x,y) - I_next(x+dx, y+dy)
+        let prev_pt_copy = prev_pt;
+        let residual_fn = |params: &[f32; 2]| -> Vec<f32> {
+            self.compute_residuals(prev_image, next_image, prev_pt_copy, params, win)
+        };
 
-            // Compute image difference
-            let (bx, by) = self.compute_mismatch(
-                prev_image,
-                next_image,
-                prev_pt,
-                cur_pos,
-                &grad_x,
-                &grad_y,
-            );
+        // Solve using Schnilbert's linearized solver
+        let result = self.solver.solve_linearized(initial_offset, residual_fn, &jacobian);
 
-            // Solve 2x2 system: [gxx gxy; gxy gyy] * [dx; dy] = [bx; by]
-            let det = gxx * gyy - gxy * gxy;
-            if det.abs() < 1e-10 {
-                return TrackResult {
-                    position: prev_pt,
-                    success: false,
-                    error: f32::MAX,
-                };
-            }
+        // Check if we went out of bounds during iteration
+        let final_pos = (prev_pt.0 + result.params[0], prev_pt.1 + result.params[1]);
 
-            let dx = (gyy * bx - gxy * by) / det;
-            let dy = (gxx * by - gxy * bx) / det;
-
-            cur_pos.0 += dx;
-            cur_pos.1 += dy;
-
-            // Check convergence
-            if dx * dx + dy * dy < self.config.epsilon * self.config.epsilon {
-                break;
-            }
+        if final_pos.0 < win as f32
+            || final_pos.1 < win as f32
+            || final_pos.0 >= (width as i32 - win) as f32
+            || final_pos.1 >= (height as i32 - win) as f32
+        {
+            return TrackResult {
+                position: prev_pt,
+                success: false,
+                error: f32::MAX,
+            };
         }
 
         TrackResult {
-            position: cur_pos,
-            success: true,
-            error: 0.0,
+            position: final_pos,
+            success: result.converged,
+            error: result.residual_norm_sq,
         }
     }
 
-    /// Compute gradient matrix (structure tensor) at a point
-    fn compute_gradient_matrix(
-        &self,
-        image: &GrayImage,
-        cx: i32,
-        cy: i32,
-    ) -> (f32, f32, f32, Vec<f32>, Vec<f32>) {
+    /// Compute Jacobian (image gradients) for all pixels in the window
+    /// Returns (jacobian_rows, min_eigenvalue)
+    ///
+    /// Each row of the Jacobian is [-dI/dx, -dI/dy] for one pixel.
+    /// The min eigenvalue of J^T*J tells us if the point is trackable.
+    fn compute_jacobian(&self, image: &GrayImage, center: (f32, f32)) -> (Vec<[f32; 2]>, f32) {
         let win = self.config.win_size as i32;
-        let win_pixels = ((2 * win + 1) * (2 * win + 1)) as usize;
+        let cx = center.0 as i32;
+        let cy = center.1 as i32;
+        let (width, height) = image.dimensions();
 
+        let win_pixels = ((2 * win + 1) * (2 * win + 1)) as usize;
+        let mut jacobian = Vec::with_capacity(win_pixels);
+
+        // Also accumulate J^T*J for eigenvalue check
         let mut gxx = 0.0f32;
         let mut gyy = 0.0f32;
         let mut gxy = 0.0f32;
-        let mut grad_x = Vec::with_capacity(win_pixels);
-        let mut grad_y = Vec::with_capacity(win_pixels);
-
-        let (width, height) = image.dimensions();
 
         for dy in -win..=win {
             for dx in -win..=win {
@@ -412,8 +399,8 @@ impl LKTracker {
                     - image.get_pixel(px, py_minus).0[0] as f32)
                     / 2.0;
 
-                grad_x.push(ix);
-                grad_y.push(iy);
+                // Jacobian row: negative gradient (since residual = prev - next)
+                jacobian.push([-ix, -iy]);
 
                 gxx += ix * ix;
                 gyy += iy * iy;
@@ -421,45 +408,49 @@ impl LKTracker {
             }
         }
 
-        (gxx, gyy, gxy, grad_x, grad_y)
+        // Compute minimum eigenvalue of J^T*J = [[gxx, gxy], [gxy, gyy]]
+        let trace = gxx + gyy;
+        let det = gxx * gyy - gxy * gxy;
+        let discriminant = (trace * trace - 4.0 * det).max(0.0);
+        let min_eig = (trace - discriminant.sqrt()) / 2.0;
+
+        (jacobian, min_eig)
     }
 
-    /// Compute mismatch vector (temporal gradient weighted by spatial gradient)
-    fn compute_mismatch(
+    /// Compute residuals: I_prev(x,y) - I_next(x+dx, y+dy) for all pixels in window
+    fn compute_residuals(
         &self,
         prev_image: &GrayImage,
         next_image: &GrayImage,
         prev_pt: (f32, f32),
-        cur_pt: (f32, f32),
-        grad_x: &[f32],
-        grad_y: &[f32],
-    ) -> (f32, f32) {
-        let win = self.config.win_size as i32;
-        let mut bx = 0.0f32;
-        let mut by = 0.0f32;
+        offset: &[f32; 2],
+        win: i32,
+    ) -> Vec<f32> {
+        let cur_pt = (prev_pt.0 + offset[0], prev_pt.1 + offset[1]);
+        let win_pixels = ((2 * win + 1) * (2 * win + 1)) as usize;
+        let mut residuals = Vec::with_capacity(win_pixels);
 
-        let mut idx = 0;
         for dy in -win..=win {
             for dx in -win..=win {
-                // Sample from prev image at integer location
+                // Sample from prev image at template location
                 let prev_val = self.sample_bilinear(
                     prev_image,
                     prev_pt.0 + dx as f32,
                     prev_pt.1 + dy as f32,
                 );
 
-                // Sample from next image at subpixel location
-                let next_val =
-                    self.sample_bilinear(next_image, cur_pt.0 + dx as f32, cur_pt.1 + dy as f32);
+                // Sample from next image at current guess
+                let next_val = self.sample_bilinear(
+                    next_image,
+                    cur_pt.0 + dx as f32,
+                    cur_pt.1 + dy as f32,
+                );
 
-                let dt = prev_val - next_val;
-                bx += grad_x[idx] * dt;
-                by += grad_y[idx] * dt;
-                idx += 1;
+                residuals.push(prev_val - next_val);
             }
         }
 
-        (bx, by)
+        residuals
     }
 
     /// Bilinear interpolation for subpixel sampling

@@ -6,10 +6,12 @@
 
 mod jet;
 pub mod math3d;
+pub mod schnilbert;
 pub mod solver;
 pub mod sparse_solver;
 
 pub use jet::{Jet, Real};
+pub use schnilbert::{Schnilbert, SchnilbertResult};
 pub use solver::LevenbergMarquardt;
 pub use sparse_solver::{SparseLevenbergMarquardt, build_slam_entries};
 
