@@ -12,6 +12,7 @@ use odysseus_solver::{Jet, SparseLevenbergMarquardt};
 use std::collections::{HashMap, HashSet};
 
 use super::apply_huber_loss;
+use super::graph_visualization::{build_graph_info, OptimizationGraphInfo};
 
 /// Configuration for VIO bundle adjustment
 #[derive(Debug, Clone)]
@@ -28,6 +29,8 @@ pub struct VioConfig {
     pub gyro_sigma: f64,
     /// Accelerometer random walk noise (m/s^2/sqrt(Hz))
     pub accel_sigma: f64,
+    /// Enable optimization graph visualization
+    pub enable_graph_viz: bool,
 }
 
 impl Default for VioConfig {
@@ -39,7 +42,16 @@ impl Default for VioConfig {
             max_active_points: 600,
             gyro_sigma: 0.001,
             accel_sigma: 0.01,
+            enable_graph_viz: false,
         }
+    }
+}
+
+impl VioConfig {
+    /// Enable optimization graph visualization
+    pub fn with_graph_viz(mut self, enable: bool) -> Self {
+        self.enable_graph_viz = enable;
+        self
     }
 }
 
@@ -48,6 +60,8 @@ pub struct VioResult {
     pub iterations: usize,
     pub converged: bool,
     pub solve_time_ms: f64,
+    /// Optimization graph visualization data
+    pub graph_info: Option<OptimizationGraphInfo>,
 }
 
 /// Run tightly-coupled VIO bundle adjustment
@@ -131,6 +145,7 @@ pub fn run_vio_bundle_adjustment(
             iterations: 0,
             converged: true,
             solve_time_ms: 0.0,
+            graph_info: None,
         };
     }
 
@@ -330,11 +345,25 @@ pub fn run_vio_bundle_adjustment(
         );
     }
 
+    // Extract graph info for visualization if enabled
+    let graph_info = if config.enable_graph_viz {
+        Some(build_graph_info(
+            &visual_obs_filtered,
+            frame_graph,
+            &pose_to_param_idx,
+            &point_to_param_idx,
+            fixed_point_ids,
+        ))
+    } else {
+        None
+    };
+
     VioResult {
         final_error,
         iterations: iteration_count,
         converged,
         solve_time_ms,
+        graph_info,
     }
 }
 

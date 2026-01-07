@@ -11,6 +11,7 @@ use odysseus_solver::math3d::Vec3;
 use odysseus_solver::{Jet, Real};
 use std::collections::{HashMap, HashSet};
 
+pub mod graph_visualization;
 pub mod marginalization;
 pub mod slam;
 pub mod vio;
@@ -22,6 +23,9 @@ pub use slam::{
 
 // Re-export shared problem types
 pub use marginalization::{compute_marginalization, SlamMarginalization};
+
+// Re-export graph visualization types
+pub use graph_visualization::{visualize_optimization_graph, OptimizationGraphInfo, PointState};
 
 // ========== Shared helper functions ==========
 

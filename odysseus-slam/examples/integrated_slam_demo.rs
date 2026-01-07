@@ -24,7 +24,7 @@ use odysseus_slam::{
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     geometry::StereoObservation,
     math::SE3,
-    optimization::{run_bundle_adjustment, BundleAdjustmentConfig, MarginalizedPrior},
+    optimization::{run_bundle_adjustment, visualize_optimization_graph, BundleAdjustmentConfig, MarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud_vec3},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
@@ -288,22 +288,31 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("   Using synthetic observations instead of visual frontend\n");
     }
 
-    // Determine frame count - use poses as source of truth
-    let total_frames = if let Some(ref poses) = gt_poses {
-        poses.len()
-    } else if use_synthetic_observations {
-        return Err("Diagnostic mode requires camera_poses.bin".into());
+    // Determine frame count and frame numbers
+    let (total_frames, frame_numbers) = if use_synthetic_observations {
+        // Synthetic mode: use sequential indices matching GT poses
+        if gt_poses.is_none() {
+            return Err("Diagnostic mode requires camera_poses.bin".into());
+        }
+        let count = gt_poses.as_ref().unwrap().len();
+        (count, (0..count as u32).collect())
     } else {
-        // Fall back to counting images if no GT poses
+        // Tracker mode: use actual frame numbers from image files
         let numbers = find_stereo_pairs(&image_dir)?;
         if numbers.is_empty() {
             return Err("No stereo pairs found in images directory".into());
         }
-        numbers.len()
-    };
+        let count = numbers.len();
 
-    // Frame numbers are just sequential indices
-    let frame_numbers: Vec<u32> = (0..total_frames as u32).collect();
+        // Verify frame count matches GT poses if available
+        if let Some(ref poses) = gt_poses {
+            if count != poses.len() {
+                eprintln!("⚠️  Warning: Found {} image pairs but {} GT poses", count, poses.len());
+            }
+        }
+
+        (count, numbers)
+    };
 
     if use_synthetic_observations {
         println!("📹 Using {} frames from camera poses\n", total_frames);
@@ -733,10 +742,15 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             &lba_frame_observations_arc,
             marginalized_prior.as_ref(),
             &fixed_point_ids,
-            &BundleAdjustmentConfig::lba(),
+            &BundleAdjustmentConfig::lba().with_graph_viz(true),
         );
         let lba_time = result.solve_time_ms;
         total_lba_time += lba_time;
+
+        // Visualize optimization graph
+        if let Some(ref graph_info) = result.graph_info {
+            visualize_optimization_graph(&rec, frame_idx, graph_info)?;
+        }
 
         // Update prior
         marginalized_prior = result.new_prior;

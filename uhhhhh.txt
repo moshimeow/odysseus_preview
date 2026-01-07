@@ -9,6 +9,8 @@ more extensive frontend simulation
 - metrics
 - feature orientation
 
+steal basalt's klt tracking sampling strategy
+
 better metrics generally
 
 IMU integration

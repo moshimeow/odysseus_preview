@@ -11,7 +11,8 @@
       "Bash(timeout 90 cargo run:*)",
       "Bash(ls:*)",
       "Bash(timeout 30 cargo run:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(find:*)"
     ]
   }
 }

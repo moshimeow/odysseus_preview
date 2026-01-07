@@ -13,7 +13,7 @@ use odysseus_slam::{
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     geometry::StereoObservation,
     math::SE3,
-    optimization::{run_bundle_adjustment, BundleAdjustmentConfig, MarginalizedPrior},
+    optimization::{run_bundle_adjustment, visualize_optimization_graph, BundleAdjustmentConfig, MarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
@@ -380,10 +380,15 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             &frame_observations_arc,
             marginalized_prior.as_ref(),
             &fixed_point_ids,
-            &BundleAdjustmentConfig::lba(),
+            &BundleAdjustmentConfig::lba().with_graph_viz(true),
         );
         let lba_time = result.solve_time_ms;
         total_lba_time += lba_time;
+
+        // Visualize optimization graph
+        if let Some(ref graph_info) = result.graph_info {
+            visualize_optimization_graph(&rec, frame_idx, graph_info)?;
+        }
 
         // Update prior from result and mark marginalized frames as inactive
         marginalized_prior = result.new_prior;

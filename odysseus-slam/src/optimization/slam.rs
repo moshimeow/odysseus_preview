@@ -19,6 +19,7 @@ use super::{
     apply_huber_loss, get_point_xyz, jet_constants, jet_variables,
     stereo_reprojection_residual_host_relative, with_jet_size,
 };
+use super::graph_visualization::{build_graph_info, OptimizationGraphInfo};
 
 /// Type alias for backward compatibility
 pub type MarginalizedPrior = SlamMarginalization;
@@ -34,6 +35,8 @@ pub struct BundleAdjustmentConfig {
     pub max_active_points: usize,
     /// Huber loss threshold (pixels)
     pub huber_delta: f64,
+    /// Enable optimization graph visualization
+    pub enable_graph_viz: bool,
 }
 
 impl Default for BundleAdjustmentConfig {
@@ -43,6 +46,7 @@ impl Default for BundleAdjustmentConfig {
             tolerance: 1e-6,
             max_active_points: 600,
             huber_delta: 1.0,
+            enable_graph_viz: false,
         }
     }
 }
@@ -55,6 +59,7 @@ impl BundleAdjustmentConfig {
             tolerance: 1e-6,
             max_active_points: 600,
             huber_delta: 1.0,
+            enable_graph_viz: false,
         }
     }
 
@@ -65,7 +70,14 @@ impl BundleAdjustmentConfig {
             tolerance: 1e-8,
             max_active_points: 800,
             huber_delta: 1.0,
+            enable_graph_viz: false,
         }
+    }
+
+    /// Enable optimization graph visualization
+    pub fn with_graph_viz(mut self, enable: bool) -> Self {
+        self.enable_graph_viz = enable;
+        self
     }
 }
 
@@ -81,6 +93,8 @@ pub struct BundleAdjustmentResult {
     pub n_points: usize,
     /// New marginalized prior (if marginalization was performed)
     pub new_prior: Option<MarginalizedPrior>,
+    /// Optimization graph visualization data
+    pub graph_info: Option<OptimizationGraphInfo>,
 }
 
 /// Run bundle adjustment with support for fixed (GBA-refined) points
@@ -150,6 +164,7 @@ pub fn run_bundle_adjustment(
             n_poses: 0,
             n_points: 0,
             new_prior: prior.cloned(),
+            graph_info: None,
         };
     }
 
@@ -278,6 +293,7 @@ pub fn run_bundle_adjustment(
             n_poses: 0,
             n_points: 0,
             new_prior: prior.cloned(),
+            graph_info: None,
         };
     }
 
@@ -381,12 +397,26 @@ pub fn run_bundle_adjustment(
         world.update_point(point_id, new_position);
     }
 
+    // Extract graph info for visualization if enabled
+    let graph_info = if config.enable_graph_viz {
+        Some(build_graph_info(
+            &observations,
+            frame_graph,
+            &pose_to_param_idx,
+            &point_to_param_idx,
+            fixed_point_ids,
+        ))
+    } else {
+        None
+    };
+
     BundleAdjustmentResult {
         solve_time_ms: solve_time.as_secs_f64() * 1000.0,
         n_observations,
         n_poses,
         n_points: n_optimized_points,
         new_prior,
+        graph_info,
     }
 }
 
