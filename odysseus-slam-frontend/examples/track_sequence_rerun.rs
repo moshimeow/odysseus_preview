@@ -130,6 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cumulative_errors: Vec<f64> = Vec::new(); // Error from track start to current
     let mut per_frame_errors: Vec<f64> = Vec::new();  // Error between consecutive frames
 
+    // Frame processing time accumulator
+    let mut frame_times: Vec<std::time::Duration> = Vec::new();
+
     // Process each frame
     let total_frames = frame_numbers.len();
     for (i, &frame_num) in frame_numbers.iter().enumerate() {
@@ -169,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = std::time::Instant::now();
         let tracks = tracker.process_frame(&left_gray, &right_gray);
         let process_time = start.elapsed();
+        frame_times.push(process_time);
 
         // Update GT tracks and compute errors
         if let (Some(ref poses), Some(ref curr_depth)) = (&poses, &depth_map) {
@@ -377,6 +381,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Median error: {:.2} pixels", median_error);
         println!("90th %%ile:   {:.2} pixels", p90_error);
         println!("99th %%ile:   {:.2} pixels", p99_error);
+    }
+
+    // Print frame timing statistics
+    if !frame_times.is_empty() {
+        let total_time: std::time::Duration = frame_times.iter().sum();
+        let avg_time = total_time / frame_times.len() as u32;
+        let max_time = frame_times.iter().max().copied().unwrap();
+
+        println!();
+        println!("=== Frame Processing Performance ===");
+        println!("Average frame time: {:?}", avg_time);
+        println!("Maximum frame time: {:?}", max_time);
     }
 
     println!("\nRerun visualization active. Close the viewer to exit.");

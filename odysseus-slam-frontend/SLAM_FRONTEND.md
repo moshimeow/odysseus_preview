@@ -44,7 +44,7 @@ Image pyramids, why do it?
 
 | Aspect | Basalt | Odysseus |
 |--------|--------|----------|
-| Method | Patch-based (Pattern51: ~52 sample points) | Traditional LK (window-based) |
+| Method | Patch-based (Pattern52: ~52 sample points) | Traditional LK (window-based) |
 | Window/Patch | ~52 points in cross pattern | 15x15 pixel window |
 | Pyramid levels | 3 | 4 |
 | Iterations | 5 per level | 30 total |

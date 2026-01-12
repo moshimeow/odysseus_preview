@@ -9,6 +9,17 @@ more extensive frontend simulation
 - metrics
 - feature orientation
 
+path to hardware integration:
+integrated slam demo working
+    frontend is fucky
+        needs klt tracking on both cameras
+        needs better sampling strategy
+        needs to integrate information from the backend
+    backend needs IMU integration (I think I know how to do this?)
+camera distortion calibration
+make sure the existing algorithms work correctly with a distorted camera
+actually hook it up to the device
+
 steal basalt's klt tracking sampling strategy
 
 the optimizer needs to use expected point stdev to normalize the residuals (?)

@@ -1,17 +1,83 @@
 //! Lucas-Kanade optical flow tracker
 //!
 //! Implements pyramidal Lucas-Kanade for tracking features across frames.
-//! Uses iterative refinement with a local window.
+//! Uses pattern-based sparse sampling (Pattern52: 52 points in cross pattern).
 
 use image::GrayImage;
 
 use crate::KeyPoint;
 
+/// Pattern52: 52 sample points in cross pattern
+/// Pattern extends from -3.5 to +3.5 pixels in both x and y
+const PATTERN_POINTS: [(f32, f32); 52] = [
+    // Top row (4 points): y=3.5
+    (-1.5, 3.5),
+    (-0.5, 3.5),
+    (0.5, 3.5),
+    (1.5, 3.5),
+    // Second row (6 points): y=2.5
+    (-2.5, 2.5),
+    (-1.5, 2.5),
+    (-0.5, 2.5),
+    (0.5, 2.5),
+    (1.5, 2.5),
+    (2.5, 2.5),
+    // Third row (8 points): y=1.5
+    (-3.5, 1.5),
+    (-2.5, 1.5),
+    (-1.5, 1.5),
+    (-0.5, 1.5),
+    (0.5, 1.5),
+    (1.5, 1.5),
+    (2.5, 1.5),
+    (3.5, 1.5),
+    // Fourth row (8 points): y=0.5
+    (-3.5, 0.5),
+    (-2.5, 0.5),
+    (-1.5, 0.5),
+    (-0.5, 0.5),
+    (0.5, 0.5),
+    (1.5, 0.5),
+    (2.5, 0.5),
+    (3.5, 0.5),
+    // Fifth row (8 points): y=-0.5
+    (-3.5, -0.5),
+    (-2.5, -0.5),
+    (-1.5, -0.5),
+    (-0.5, -0.5),
+    (0.5, -0.5),
+    (1.5, -0.5),
+    (2.5, -0.5),
+    (3.5, -0.5),
+    // Sixth row (8 points): y=-1.5
+    (-3.5, -1.5),
+    (-2.5, -1.5),
+    (-1.5, -1.5),
+    (-0.5, -1.5),
+    (0.5, -1.5),
+    (1.5, -1.5),
+    (2.5, -1.5),
+    (3.5, -1.5),
+    // Seventh row (6 points): y=-2.5
+    (-2.5, -2.5),
+    (-1.5, -2.5),
+    (-0.5, -2.5),
+    (0.5, -2.5),
+    (1.5, -2.5),
+    (2.5, -2.5),
+    // Bottom row (4 points): y=-3.5
+    (-1.5, -3.5),
+    (-0.5, -3.5),
+    (0.5, -3.5),
+    (1.5, -3.5),
+];
+
+/// Pattern margin: minimum distance from image border (ceil(3.5) = 4)
+const PATTERN_MARGIN: i32 = 4;
+
 /// Configuration for Lucas-Kanade tracker
 #[derive(Debug, Clone)]
 pub struct LKConfig {
-    /// Size of the tracking window (half-width, so window is 2*win_size+1)
-    pub win_size: usize,
     /// Maximum number of iterations per pyramid level
     pub max_iterations: usize,
     /// Convergence threshold (stop if motion < this)
@@ -28,7 +94,6 @@ pub struct LKConfig {
 impl Default for LKConfig {
     fn default() -> Self {
         Self {
-            win_size: 11,
             max_iterations: 30,
             epsilon: 0.01,
             num_levels: 3,
@@ -287,13 +352,12 @@ impl LKTracker {
         init_guess: (f32, f32),
     ) -> TrackResult {
         let (width, height) = prev_image.dimensions();
-        let win = self.config.win_size as i32;
 
-        // Check bounds
-        if prev_pt.0 < win as f32
-            || prev_pt.1 < win as f32
-            || prev_pt.0 >= (width as i32 - win) as f32
-            || prev_pt.1 >= (height as i32 - win) as f32
+        // Check bounds - pattern extends PATTERN_MARGIN pixels from center
+        if prev_pt.0 < PATTERN_MARGIN as f32
+            || prev_pt.1 < PATTERN_MARGIN as f32
+            || prev_pt.0 >= (width as i32 - PATTERN_MARGIN) as f32
+            || prev_pt.1 >= (height as i32 - PATTERN_MARGIN) as f32
         {
             return TrackResult {
                 position: prev_pt,
@@ -302,9 +366,9 @@ impl LKTracker {
             };
         }
 
-        // Compute image gradients and structure tensor in the window
+        // Compute image gradients and structure tensor using pattern sampling
         let (gxx, gyy, gxy, grad_x, grad_y) =
-            self.compute_gradient_matrix(prev_image, prev_pt.0 as i32, prev_pt.1 as i32);
+            self.compute_gradient_matrix_pattern(prev_image, prev_pt.0, prev_pt.1);
 
         // Check minimum eigenvalue
         let trace = gxx + gyy;
@@ -325,10 +389,10 @@ impl LKTracker {
 
         for _iter in 0..self.config.max_iterations {
             // Check bounds for current guess
-            if cur_pos.0 < win as f32
-                || cur_pos.1 < win as f32
-                || cur_pos.0 >= (width as i32 - win) as f32
-                || cur_pos.1 >= (height as i32 - win) as f32
+            if cur_pos.0 < PATTERN_MARGIN as f32
+                || cur_pos.1 < PATTERN_MARGIN as f32
+                || cur_pos.0 >= (width as i32 - PATTERN_MARGIN) as f32
+                || cur_pos.1 >= (height as i32 - PATTERN_MARGIN) as f32
             {
                 return TrackResult {
                     position: prev_pt,
@@ -337,8 +401,8 @@ impl LKTracker {
                 };
             }
 
-            // Compute image difference
-            let (bx, by) = self.compute_mismatch(
+            // Compute image difference using pattern sampling
+            let (bx, by) = self.compute_mismatch_pattern(
                 prev_image,
                 next_image,
                 prev_pt,
@@ -376,56 +440,54 @@ impl LKTracker {
         }
     }
 
-    /// Compute gradient matrix (structure tensor) at a point
-    fn compute_gradient_matrix(
+    /// Compute gradient matrix (structure tensor) at a point using pattern sampling
+    fn compute_gradient_matrix_pattern(
         &self,
         image: &GrayImage,
-        cx: i32,
-        cy: i32,
+        cx: f32,
+        cy: f32,
     ) -> (f32, f32, f32, Vec<f32>, Vec<f32>) {
-        let win = self.config.win_size as i32;
-        let win_pixels = ((2 * win + 1) * (2 * win + 1)) as usize;
-
         let mut gxx = 0.0f32;
         let mut gyy = 0.0f32;
         let mut gxy = 0.0f32;
-        let mut grad_x = Vec::with_capacity(win_pixels);
-        let mut grad_y = Vec::with_capacity(win_pixels);
+        let mut grad_x = Vec::with_capacity(PATTERN_POINTS.len());
+        let mut grad_y = Vec::with_capacity(PATTERN_POINTS.len());
 
-        let (width, height) = image.dimensions();
-
-        for dy in -win..=win {
-            for dx in -win..=win {
-                let px = (cx + dx) as u32;
-                let py = (cy + dy) as u32;
-
-                // Central differences for gradient
-                let px_plus = (px + 1).min(width - 1);
-                let px_minus = px.saturating_sub(1);
-                let py_plus = (py + 1).min(height - 1);
-                let py_minus = py.saturating_sub(1);
-
-                let ix = (image.get_pixel(px_plus, py).0[0] as f32
-                    - image.get_pixel(px_minus, py).0[0] as f32)
-                    / 2.0;
-                let iy = (image.get_pixel(px, py_plus).0[0] as f32
-                    - image.get_pixel(px, py_minus).0[0] as f32)
-                    / 2.0;
-
-                grad_x.push(ix);
-                grad_y.push(iy);
-
-                gxx += ix * ix;
-                gyy += iy * iy;
-                gxy += ix * iy;
-            }
+        for &(px, py) in &PATTERN_POINTS {
+            let sample_x = cx + px;
+            let sample_y = cy + py;
+            // Sample gradient at pattern point
+            let (ix, iy) = self.sample_gradient(image, sample_x, sample_y);
+            grad_x.push(ix);
+            grad_y.push(iy);
+            gxx += ix * ix;
+            gyy += iy * iy;
+            gxy += ix * iy;
         }
 
         (gxx, gyy, gxy, grad_x, grad_y)
     }
 
-    /// Compute mismatch vector (temporal gradient weighted by spatial gradient)
-    fn compute_mismatch(
+    /// Sample gradient at subpixel location using central differences
+    /// This computes the gradient by sampling the image at offset locations
+    fn sample_gradient(&self, image: &GrayImage, x: f32, y: f32) -> (f32, f32) {
+        // Use bilinear interpolation to sample gradient
+        // For gradient in x: sample at (x+1, y) and (x-1, y)
+        // For gradient in y: sample at (x, y+1) and (x, y-1)
+        // Note: sample_bilinear handles bounds clamping internally
+        let ix_plus = self.sample_bilinear(image, x + 1.0, y);
+        let ix_minus = self.sample_bilinear(image, x - 1.0, y);
+        let iy_plus = self.sample_bilinear(image, x, y + 1.0);
+        let iy_minus = self.sample_bilinear(image, x, y - 1.0);
+
+        let ix = (ix_plus - ix_minus) / 2.0;
+        let iy = (iy_plus - iy_minus) / 2.0;
+
+        (ix, iy)
+    }
+
+    /// Compute mismatch vector (temporal gradient weighted by spatial gradient) using pattern sampling
+    fn compute_mismatch_pattern(
         &self,
         prev_image: &GrayImage,
         next_image: &GrayImage,
@@ -434,29 +496,19 @@ impl LKTracker {
         grad_x: &[f32],
         grad_y: &[f32],
     ) -> (f32, f32) {
-        let win = self.config.win_size as i32;
         let mut bx = 0.0f32;
         let mut by = 0.0f32;
 
-        let mut idx = 0;
-        for dy in -win..=win {
-            for dx in -win..=win {
-                // Sample from prev image at integer location
-                let prev_val = self.sample_bilinear(
-                    prev_image,
-                    prev_pt.0 + dx as f32,
-                    prev_pt.1 + dy as f32,
-                );
+        for (i, &(px, py)) in PATTERN_POINTS.iter().enumerate() {
+            // Sample from prev image at pattern offset
+            let prev_val = self.sample_bilinear(prev_image, prev_pt.0 + px, prev_pt.1 + py);
 
-                // Sample from next image at subpixel location
-                let next_val =
-                    self.sample_bilinear(next_image, cur_pt.0 + dx as f32, cur_pt.1 + dy as f32);
+            // Sample from next image at pattern offset relative to current position
+            let next_val = self.sample_bilinear(next_image, cur_pt.0 + px, cur_pt.1 + py);
 
-                let dt = prev_val - next_val;
-                bx += grad_x[idx] * dt;
-                by += grad_y[idx] * dt;
-                idx += 1;
-            }
+            let dt = prev_val - next_val;
+            bx += grad_x[i] * dt;
+            by += grad_y[i] * dt;
         }
 
         (bx, by)
@@ -507,20 +559,23 @@ mod tests {
     fn test_lk_tracker_stationary() {
         let tracker = LKTracker::new();
 
-        // Create a simple test image with a corner
+        // Create a test image with a corner that has gradient
+        // The corner at (50, 50) will have texture for tracking
         let mut image = GrayImage::from_pixel(100, 100, image::Luma([128]));
-        // Add a bright square
-        for y in 40..60 {
-            for x in 40..60 {
+        // Add a bright square - track point near the corner where there's gradient
+        for y in 50..80 {
+            for x in 50..80 {
                 image.put_pixel(x, y, image::Luma([200]));
             }
         }
 
-        // Track with identical images - should find same position
+        // Track a point near the corner (50, 50) where the pattern will see gradient
+        // Pattern52 extends ±3.5 pixels, so point at (50, 50) samples (46.5-53.5)
+        // which crosses the edge at x=50 and y=50
         let points = vec![(50.0, 50.0)];
         let results = tracker.track(&image, &image, &points);
 
-        assert!(results[0].success);
+        assert!(results[0].success, "Tracking failed - point at ({}, {})", results[0].position.0, results[0].position.1);
         assert!((results[0].position.0 - 50.0).abs() < 1.0);
         assert!((results[0].position.1 - 50.0).abs() < 1.0);
     }

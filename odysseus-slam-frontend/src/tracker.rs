@@ -49,7 +49,6 @@ impl Default for TrackerConfig {
             max_features: 300,
             max_age_without_stereo: 5, // Allow more frames without stereo before pruning
             lk_config: LKConfig {
-                win_size: 15,           // Larger window for more robust tracking (was 11)
                 max_iterations: 30,
                 epsilon: 0.01,
                 num_levels: 3,          // More pyramid levels for larger motions (was 3)
