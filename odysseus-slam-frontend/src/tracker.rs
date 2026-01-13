@@ -52,18 +52,17 @@ impl Default for TrackerConfig {
         Self {
             min_features: 100,
             max_features: 300,
-            max_age_without_stereo: 5, // Allow more frames without stereo before pruning
+            max_age_without_stereo: 2, // Frames without a stereo match before dropping a feature
             lk_config: LKConfig {
                 max_iterations: 30,
                 epsilon: 0.01,
-                num_levels: 3,          // More pyramid levels for larger motions (was 3)
-                min_eigenvalue: 10.0,   // Reject tracking if landed on flat/edge region
-                                        // Detection uses 100.0, tracking is more permissive
-                forward_backward_threshold: 2.0, // Reject if round-trip error > 2 pixels
+                num_levels: 3,          // More pyramid levels for larger motions
+                min_eigenvalue: 20.0,   // Stricter: reject tracking if landed on weak texture
+                forward_backward_threshold: 0.2, // Tighter consistency check (Basalt uses 0.2)
             },
             grid_size: 64,
             default_stereo_depth: 3.0,  // 3 meters reasonable for indoor/outdoor
-            epipolar_error_threshold: 2.0,  // Based on Basalt's config
+            epipolar_error_threshold: 1.0,  // Tighter vertical alignment for rectified stereo
         }
     }
 }
@@ -103,9 +102,9 @@ impl Tracker {
 
     /// Create a new tracker with custom configuration
     pub fn with_config(config: TrackerConfig) -> Self {
-        // Configure detector - with forward-backward check we can be more permissive
-        let detector = FastDetector::new(20, 32, config.max_features)
-            .with_min_eigen_threshold(10.0)
+        // Configure detector - higher threshold for better quality features
+        let detector = FastDetector::new(30, 32, config.max_features)
+            .with_min_eigen_threshold(20.0)  // Match tracking threshold
             .with_subpixel_refinement(true);
 
         Self {
@@ -226,48 +225,50 @@ impl Tracker {
             HashMap::new()
         };
 
-        // Step 2: For each left feature, initialize right position with depth
+        // Step 2: For each left feature, get or compute right position
         // Collect data needed for tracking first to avoid borrow issues
-        let track_data: Vec<(usize, KeyPoint, f32, (f32, f32))> = track_ids
+        let track_data: Vec<(usize, KeyPoint, Option<(f32, f32)>)> = track_ids
             .iter()
             .map(|&id| {
                 let track = &self.tracks[&id];
                 let left_kp = track.stereo.left_kp;
                 
-                // Get depth estimate (from backend or default)
-                let depth = self.feature_depths.get(&id)
-                    .copied()
-                    .unwrap_or(self.config.default_stereo_depth as f32);
+                // Check if temporal tracking succeeded for right camera
+                let temporal_right = right_tracked.get(&id).copied();
                 
-                // Initial guess: project left to right using depth
-                let (right_u_guess, right_v_guess) = if let Some(ref cam) = self.camera {
-                    cam.project_left_to_right(left_kp.x, left_kp.y, depth)
-                } else {
-                    // Fallback: assume rectified stereo, estimate disparity
-                    let disparity = 50.0;  // rough guess
-                    (left_kp.x - disparity, left_kp.y)
-                };
-                
-                // If we tracked right temporally, use that as starting point
-                let right_init = if let Some(&temporal_pos) = right_tracked.get(&id) {
-                    temporal_pos
-                } else {
-                    (right_u_guess, right_v_guess)
-                };
-                
-                (id, left_kp, depth, right_init)
+                (id, left_kp, temporal_right)
             })
             .collect();
         
         // Now perform tracking and update tracks
-        for (id, left_kp, _depth, right_init) in track_data {
-            // Track from left to right using LK with initialization
-            if let Some(right_kp) = self.track_stereo_with_init(
-                left_image,
-                right_image,
-                &left_kp,
-                right_init,
-            ) {
+        for (id, left_kp, temporal_right) in track_data {
+            // If temporal tracking succeeded, trust it! Otherwise fall back to stereo matching
+            let right_kp_result = if let Some(temporal_pos) = temporal_right {
+                // Temporal tracking succeeded - use it directly
+                Some(KeyPoint {
+                    x: temporal_pos.0,
+                    y: temporal_pos.1,
+                    response: left_kp.response,
+                    angle: 0.0,
+                })
+            } else {
+                // Temporal tracking failed - compute depth-based init and run stereo LK
+                let depth = self.feature_depths.get(&id)
+                    .copied()
+                    .unwrap_or(self.config.default_stereo_depth as f32);
+                
+                let right_init = if let Some(ref cam) = self.camera {
+                    cam.project_left_to_right(left_kp.x, left_kp.y, depth)
+                } else {
+                    // Fallback: assume rectified stereo, estimate disparity
+                    let disparity = 50.0;
+                    (left_kp.x - disparity, left_kp.y)
+                };
+                
+                self.track_stereo_with_init(left_image, right_image, &left_kp, right_init)
+            };
+            
+            if let Some(right_kp) = right_kp_result {
                 let track = self.tracks.get_mut(&id).unwrap();
                 
                 // Update right position
@@ -336,8 +337,15 @@ impl Tracker {
         left_kp: &KeyPoint,
         right_init: (f32, f32),
     ) -> Option<KeyPoint> {
-        // Track from left to right with initialization
-        let result = self.lk_tracker.track(left_image, right_image, &[(right_init.0, right_init.1)]);
+        // Track from left image to right image
+        // Source point: left_kp position in left_image
+        // Initial guess: right_init position in right_image
+        let result = self.lk_tracker.track_with_guess(
+            left_image, 
+            right_image, 
+            &[(left_kp.x, left_kp.y)],
+            Some(&[right_init])
+        );
 
         if !result[0].success {
             return None;

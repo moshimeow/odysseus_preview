@@ -140,6 +140,24 @@ impl LKTracker {
         next_image: &GrayImage,
         points: &[(f32, f32)],
     ) -> Vec<TrackResult> {
+        self.track_with_guess(prev_image, next_image, points, None)
+    }
+
+    /// Track a set of points with optional initial guesses for their positions in next_image
+    /// 
+    /// # Arguments
+    /// * `prev_image` - Source image
+    /// * `next_image` - Destination image  
+    /// * `points` - Points to track in prev_image
+    /// * `init_guesses` - Optional initial guesses for where each point is in next_image
+    ///                    If None, uses the same position as in prev_image
+    pub fn track_with_guess(
+        &self,
+        prev_image: &GrayImage,
+        next_image: &GrayImage,
+        points: &[(f32, f32)],
+        init_guesses: Option<&[(f32, f32)]>,
+    ) -> Vec<TrackResult> {
         // Build image pyramids
         let prev_pyramid = self.build_pyramid(prev_image);
         let next_pyramid = self.build_pyramid(next_image);
@@ -147,7 +165,11 @@ impl LKTracker {
         // Forward tracking: prev -> next
         let forward_results: Vec<TrackResult> = points
             .iter()
-            .map(|&pt| self.track_point(&prev_pyramid, &next_pyramid, pt))
+            .enumerate()
+            .map(|(i, &pt)| {
+                let init_guess = init_guesses.map(|guesses| guesses[i]);
+                self.track_point(&prev_pyramid, &next_pyramid, pt, init_guess)
+            })
             .collect();
 
         // If forward-backward check is disabled, return forward results
@@ -163,7 +185,7 @@ impl LKTracker {
 
         let backward_results: Vec<TrackResult> = backward_points
             .iter()
-            .map(|&pt| self.track_point(&next_pyramid, &prev_pyramid, pt))
+            .map(|&pt| self.track_point(&next_pyramid, &prev_pyramid, pt, None))
             .collect();
 
         // Check forward-backward consistency
@@ -273,30 +295,43 @@ impl LKTracker {
     }
 
     /// Track a single point through the pyramid
+    /// 
+    /// # Arguments
+    /// * `prev_pyramid` - Source image pyramid
+    /// * `next_pyramid` - Destination image pyramid
+    /// * `point` - Point position in source image
+    /// * `init_guess` - Optional initial guess for position in destination image
     fn track_point(
         &self,
         prev_pyramid: &[GrayImage],
         next_pyramid: &[GrayImage],
         point: (f32, f32),
+        init_guess: Option<(f32, f32)>,
     ) -> TrackResult {
         let num_levels = prev_pyramid.len();
 
         // Scale point to coarsest level
         let scale = (1 << (num_levels - 1)) as f32;
-        let mut guess = (point.0 / scale, point.1 / scale);
+        
+        // Use initial guess if provided, otherwise start at same position
+        let init_pos = init_guess.unwrap_or(point);
+        let mut guess = (init_pos.0 / scale, init_pos.1 / scale);
         let mut flow = (0.0f32, 0.0f32);
 
         // Coarse to fine
         for level in (0..num_levels).rev() {
             let level_scale = (1 << level) as f32;
             let prev_pt = (point.0 / level_scale, point.1 / level_scale);
+            
+            // Current guess at this level (incorporating flow from coarser levels)
+            let current_guess = (guess.0 + flow.0, guess.1 + flow.1);
 
             // Refine flow at this level
             let result = self.track_at_level(
                 &prev_pyramid[level],
                 &next_pyramid[level],
                 prev_pt,
-                (guess.0 + flow.0, guess.1 + flow.1),
+                current_guess,
             );
 
             if !result.success {
