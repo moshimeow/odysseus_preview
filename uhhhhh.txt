@@ -17,6 +17,7 @@ integrated slam demo working
         needs to integrate information from the backend
     backend needs IMU integration (I think I know how to do this?)
 camera distortion calibration
+camera distortion handling in the frontend
 make sure the existing algorithms work correctly with a distorted camera
 actually hook it up to the device
 
