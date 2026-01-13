@@ -11,7 +11,7 @@ use image::GrayImage;
 
 use crate::{
     lk_tracker::{LKConfig, LKTracker},
-    BriefDescriptor, BriefExtractor, FastDetector, KeyPoint, StereoMatch, StereoMatcher,
+    BriefDescriptor, BriefExtractor, FastDetector, KeyPoint, StereoCamera, StereoMatch, StereoMatcher,
 };
 
 /// A tracked feature with persistent ID
@@ -40,6 +40,11 @@ pub struct TrackerConfig {
     pub lk_config: LKConfig,
     /// Grid cell size for ensuring spatial distribution of new features
     pub grid_size: usize,
+    /// Default depth for stereo matching initialization (meters)
+    /// Used when backend depth estimates are unavailable
+    pub default_stereo_depth: f64,
+    /// Epipolar error threshold (pixels)
+    pub epipolar_error_threshold: f32,
 }
 
 impl Default for TrackerConfig {
@@ -57,6 +62,8 @@ impl Default for TrackerConfig {
                 forward_backward_threshold: 2.0, // Reject if round-trip error > 2 pixels
             },
             grid_size: 64,
+            default_stereo_depth: 3.0,  // 3 meters reasonable for indoor/outdoor
+            epipolar_error_threshold: 2.0,  // Based on Basalt's config
         }
     }
 }
@@ -80,6 +87,12 @@ pub struct Tracker {
     stereo_matcher: StereoMatcher,
     /// Previous left image (for LK tracking)
     prev_left: Option<GrayImage>,
+    /// Previous right image (for temporal tracking)
+    prev_right: Option<GrayImage>,
+    /// Per-feature depth estimates (feature_id -> depth in meters)
+    feature_depths: HashMap<usize, f32>,
+    /// Camera model for depth-based stereo initialization
+    camera: Option<StereoCamera>,
 }
 
 impl Tracker {
@@ -105,7 +118,16 @@ impl Tracker {
             extractor: BriefExtractor::new(),
             stereo_matcher: StereoMatcher::default(),
             prev_left: None,
+            prev_right: None,
+            feature_depths: HashMap::new(),
+            camera: None,
         }
+    }
+
+    /// Set the camera model for depth-based stereo initialization
+    pub fn with_camera(mut self, camera: StereoCamera) -> Self {
+        self.camera = Some(camera);
+        self
     }
 
     /// Process a stereo frame pair
@@ -139,6 +161,9 @@ impl Tracker {
         // Step 3: Perform stereo matching for all tracked features
         self.update_stereo_matches(left_image, right_image);
 
+        // Step 3.5: Filter epipolar outliers
+        self.filter_epipolar_outliers();
+
         // Step 4: Remove features that failed stereo matching for too long
         self.prune_dead_tracks();
 
@@ -147,8 +172,9 @@ impl Tracker {
             self.detect_new_features(left_image, right_image, frame_idx);
         }
 
-        // Store current frame for next iteration
+        // Store current frames for next iteration
         self.prev_left = Some(left_image.clone());
+        self.prev_right = Some(right_image.clone());
 
         // Return current tracks
         self.tracks.values().cloned().collect()
@@ -189,35 +215,177 @@ impl Tracker {
         result
     }
 
-    /// Update stereo matches for tracked features
+    /// Update stereo matches using temporal tracking with depth-based initialization
     fn update_stereo_matches(&mut self, left_image: &GrayImage, right_image: &GrayImage) {
-        // Detect features in right image for stereo matching
-        let right_keypoints = self.detector.detect(right_image);
-        let right_features = self.extractor.compute_all(right_image, &right_keypoints);
-
-        // For each tracked feature, try to find stereo match
         let track_ids: Vec<usize> = self.tracks.keys().copied().collect();
 
-        for id in track_ids {
-            let track = self.tracks.get_mut(&id).unwrap();
+        // Step 1: Track right camera temporally (if we have previous right)
+        let right_tracked = if let Some(ref prev_right) = self.prev_right {
+            self.track_right_camera_temporal(prev_right, right_image, &track_ids)
+        } else {
+            HashMap::new()
+        };
 
-            // Recompute descriptor at new position
-            let kp = track.stereo.left_kp;
-            if let Some(desc) = self.extractor.compute(left_image, &kp) {
-                // Find best match in right image
-                if let Some((right_kp, disparity)) =
-                    find_stereo_match(&kp, &desc, &right_features)
-                {
-                    track.stereo.right_kp = right_kp;
-                    track.stereo.descriptor = desc;
-                    track.stereo.disparity = disparity;
-                    track.age = 0; // Reset age on successful stereo match
+        // Step 2: For each left feature, initialize right position with depth
+        // Collect data needed for tracking first to avoid borrow issues
+        let track_data: Vec<(usize, KeyPoint, f32, (f32, f32))> = track_ids
+            .iter()
+            .map(|&id| {
+                let track = &self.tracks[&id];
+                let left_kp = track.stereo.left_kp;
+                
+                // Get depth estimate (from backend or default)
+                let depth = self.feature_depths.get(&id)
+                    .copied()
+                    .unwrap_or(self.config.default_stereo_depth as f32);
+                
+                // Initial guess: project left to right using depth
+                let (right_u_guess, right_v_guess) = if let Some(ref cam) = self.camera {
+                    cam.project_left_to_right(left_kp.x, left_kp.y, depth)
                 } else {
-                    track.age += 1; // Increment age on failed stereo match
+                    // Fallback: assume rectified stereo, estimate disparity
+                    let disparity = 50.0;  // rough guess
+                    (left_kp.x - disparity, left_kp.y)
+                };
+                
+                // If we tracked right temporally, use that as starting point
+                let right_init = if let Some(&temporal_pos) = right_tracked.get(&id) {
+                    temporal_pos
+                } else {
+                    (right_u_guess, right_v_guess)
+                };
+                
+                (id, left_kp, depth, right_init)
+            })
+            .collect();
+        
+        // Now perform tracking and update tracks
+        for (id, left_kp, _depth, right_init) in track_data {
+            // Track from left to right using LK with initialization
+            if let Some(right_kp) = self.track_stereo_with_init(
+                left_image,
+                right_image,
+                &left_kp,
+                right_init,
+            ) {
+                let track = self.tracks.get_mut(&id).unwrap();
+                
+                // Update right position
+                track.stereo.right_kp = right_kp;
+
+                // Update disparity
+                let disparity = left_kp.x - right_kp.x;
+                track.stereo.disparity = disparity;
+
+                // Update depth estimate from disparity
+                if disparity > 1.0 {
+                    if let Some(ref cam) = self.camera {
+                        let new_depth = cam.baseline * cam.left.fx / disparity;
+                        self.feature_depths.insert(id, new_depth);
+                    }
                 }
+
+                // Recompute descriptor at new position
+                if let Some(desc) = self.extractor.compute(left_image, &left_kp) {
+                    track.stereo.descriptor = desc;
+                }
+
+                track.age = 0;  // Reset age on success
             } else {
-                track.age += 1;
+                let track = self.tracks.get_mut(&id).unwrap();
+                track.age += 1;  // Failed stereo match
             }
+        }
+    }
+
+    /// Track right camera temporally from previous frame
+    fn track_right_camera_temporal(
+        &self,
+        prev_right: &GrayImage,
+        curr_right: &GrayImage,
+        track_ids: &[usize],
+    ) -> HashMap<usize, (f32, f32)> {
+        let points: Vec<(f32, f32)> = track_ids
+            .iter()
+            .map(|id| {
+                let track = &self.tracks[id];
+                (track.stereo.right_kp.x, track.stereo.right_kp.y)
+            })
+            .collect();
+
+        let results = self.lk_tracker.track(prev_right, curr_right, &points);
+
+        track_ids
+            .iter()
+            .zip(results.iter())
+            .filter_map(|(id, result)| {
+                if result.success {
+                    Some((*id, result.position))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Track stereo correspondence with depth-based initialization
+    fn track_stereo_with_init(
+        &self,
+        left_image: &GrayImage,
+        right_image: &GrayImage,
+        left_kp: &KeyPoint,
+        right_init: (f32, f32),
+    ) -> Option<KeyPoint> {
+        // Track from left to right with initialization
+        let result = self.lk_tracker.track(left_image, right_image, &[(right_init.0, right_init.1)]);
+
+        if !result[0].success {
+            return None;
+        }
+
+        let right_pos = result[0].position;
+
+        // Basic epipolar constraint: vertical difference should be small
+        let vertical_diff = (left_kp.y - right_pos.1).abs();
+        if vertical_diff > 2.0 {
+            return None;
+        }
+
+        // Disparity should be positive (right image shifted left)
+        let disparity = left_kp.x - right_pos.0;
+        if disparity < 1.0 || disparity > 200.0 {
+            return None;
+        }
+
+        Some(KeyPoint {
+            x: right_pos.0,
+            y: right_pos.1,
+            response: left_kp.response,
+            angle: 0.0,  // Angle not used for stereo matching
+        })
+    }
+
+    /// Filter out tracks with excessive epipolar error
+    fn filter_epipolar_outliers(&mut self) {
+        let threshold = self.config.epipolar_error_threshold;
+
+        let mut to_remove = Vec::new();
+
+        for (id, track) in &self.tracks {
+            let left_kp = &track.stereo.left_kp;
+            let right_kp = &track.stereo.right_kp;
+
+            // Simple epipolar check: vertical alignment
+            let vertical_error = (left_kp.y - right_kp.y).abs();
+
+            if vertical_error > threshold {
+                to_remove.push(*id);
+            }
+        }
+
+        for id in to_remove {
+            self.tracks.remove(&id);
+            self.feature_depths.remove(&id);
         }
     }
 
@@ -318,6 +486,23 @@ impl Tracker {
     /// Get all current tracks
     pub fn get_tracks(&self) -> &HashMap<usize, TrackedFeature> {
         &self.tracks
+    }
+
+    /// Update depth estimates from backend
+    ///
+    /// # Arguments
+    /// * `feature_depths` - Map from feature ID to depth in meters
+    pub fn update_depth_estimates(&mut self, feature_depths: HashMap<usize, f32>) {
+        for (id, depth) in feature_depths {
+            if self.tracks.contains_key(&id) {
+                self.feature_depths.insert(id, depth);
+            }
+        }
+    }
+
+    /// Get current depth estimates (for backend)
+    pub fn get_depth_estimates(&self) -> &HashMap<usize, f32> {
+        &self.feature_depths
     }
 }
 

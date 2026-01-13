@@ -141,17 +141,30 @@ pub fn visualize_ground_truth(
     rec.set_time_sequence("trajectory", 0);
 
     // Ground truth points (gray)
-    let point_positions: Vec<[f32; 3]> = points
-        .iter()
-        .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-        .collect();
+    if !points.is_empty() {
+        let point_positions: Vec<[f32; 3]> = points
+            .iter()
+            .filter_map(|p| {
+                let x = p.x as f32;
+                let y = p.y as f32;
+                let z = p.z as f32;
+                if x.is_finite() && y.is_finite() && z.is_finite() {
+                    Some([x, y, z])
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    rec.log(
-        "world/ground_truth/points",
-        &rr::Points3D::new(point_positions)
-            .with_colors([[120, 120, 120]])
-            .with_radii([0.03]),
-    )?;
+        if !point_positions.is_empty() {
+            rec.log(
+                "world/ground_truth/points",
+                &rr::Points3D::new(point_positions)
+                    .with_colors([[120, 120, 120]])
+                    .with_radii([0.03]),
+            )?;
+        }
+    }
 
     // Ground truth trajectory (gray line)
     let trajectory: Vec<[f32; 3]> = poses
@@ -249,17 +262,51 @@ pub fn visualize_estimate(
 
     // Estimated points (blue)
     let all_points = world.get_all_points();
-    let point_positions: Vec<[f32; 3]> = all_points
-        .iter()
-        .map(|(_, p)| [p.x as f32, p.y as f32, p.z as f32])
-        .collect();
+    if !all_points.is_empty() {
+        // Filter out any invalid points (NaN/infinity) and outliers to prevent rendering issues
+        // Outliers from tracking errors can cause Rerun to zoom way out
+        const MAX_POINT_DISTANCE: f32 = 100.0; // meters from origin
+        let mut outlier_count = 0;
+        let mut max_dist = 0.0f32;
+        let point_positions: Vec<[f32; 3]> = all_points
+            .iter()
+            .filter_map(|(_, p)| {
+                let x = p.x as f32;
+                let y = p.y as f32;
+                let z = p.z as f32;
+                if x.is_finite() && y.is_finite() && z.is_finite() {
+                    let dist = (x * x + y * y + z * z).sqrt();
+                    max_dist = max_dist.max(dist);
+                    
+                    if dist < MAX_POINT_DISTANCE {
+                        Some([x, y, z])
+                    } else {
+                        outlier_count += 1;
+                        None
+                    }
+                } else {
+                    outlier_count += 1;
+                    None
+                }
+            })
+            .collect();
 
-    rec.log(
-        "world/estimate/points",
-        &rr::Points3D::new(point_positions)
-            .with_colors([[50, 150, 255]])
-            .with_radii([0.04]),
-    )?;
+        // Log diagnostics if outliers found or periodically
+        if outlier_count > 0 || (frame_idx % 50 == 0 && frame_idx > 0) {
+            eprintln!("📊 [visualize_estimate] Frame {}: max_dist={:.1}m, kept {}/{} points{}", 
+                frame_idx, max_dist, point_positions.len(), all_points.len(),
+                if outlier_count > 0 { format!(", filtered {} outliers", outlier_count) } else { String::new() });
+        }
+
+        if !point_positions.is_empty() {
+            rec.log(
+                "world/estimate/points",
+                &rr::Points3D::new(point_positions)
+                    .with_colors([[50, 150, 255]])
+                    .with_radii([0.04]),
+            )?;
+        }
+    }
 
     // Draw error lines between estimated and GT points
     let mut error_lines = Vec::new();
@@ -334,17 +381,36 @@ pub fn visualize_gba_update(
 
     // GBA points (orange)
     let all_points = gba_world.get_all_points();
-    let point_positions: Vec<[f32; 3]> = all_points
-        .iter()
-        .map(|(_, p)| [p.x as f32, p.y as f32, p.z as f32])
-        .collect();
+    if !all_points.is_empty() {
+        let point_positions: Vec<[f32; 3]> = all_points
+            .iter()
+            .filter_map(|(_, p)| {
+                let x = p.x as f32;
+                let y = p.y as f32;
+                let z = p.z as f32;
+                if x.is_finite() && y.is_finite() && z.is_finite() {
+                    // Reject outliers: points more than 100m from origin
+                    let dist_sq = x * x + y * y + z * z;
+                    if dist_sq < 100.0 * 100.0 {
+                        Some([x, y, z])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    rec.log(
-        "world/gba_estimate/points",
-        &rr::Points3D::new(point_positions.clone())
-            .with_colors([[255, 165, 0]]) // Orange
-            .with_radii([0.035]),
-    )?;
+        if !point_positions.is_empty() {
+            rec.log(
+                "world/gba_estimate/points",
+                &rr::Points3D::new(point_positions)
+                    .with_colors([[255, 165, 0]]) // Orange
+                    .with_radii([0.035]),
+            )?;
+        }
+    }
 
     // GBA cameras - only update those whose state changed
     for (idx, frame) in gba_world.frames.iter().enumerate() {

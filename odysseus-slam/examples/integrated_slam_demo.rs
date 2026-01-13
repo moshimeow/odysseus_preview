@@ -28,7 +28,7 @@ use odysseus_slam::{
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud_vec3},
     visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
-    SlamSystem, SlamSystemDynamic, WorldState,
+    SlamSystemDynamic, WorldState,
 };
 use odysseus_slam_frontend::{TrackedFeature, Tracker, TrackerConfig};
 use odysseus_solver::math3d::Vec3;
@@ -379,7 +379,20 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             max_features: 400,
             ..Default::default()
         };
-        let mut pre_tracker = Tracker::with_config(config.clone());
+        
+        // Create frontend camera model for pre-tracker
+        use odysseus_slam_frontend::{PinholeCamera, StereoCamera as FrontendStereoCamera};
+        let frontend_camera = FrontendStereoCamera {
+            left: PinholeCamera {
+                fx: stereo_camera.left.fx as f32,
+                fy: stereo_camera.left.fy as f32,
+                cx: stereo_camera.left.cx as f32,
+                cy: stereo_camera.left.cy as f32,
+            },
+            baseline: stereo_camera.baseline as f32,
+        };
+        
+        let mut pre_tracker = Tracker::with_config(config.clone()).with_camera(frontend_camera);
 
         // Track through all frames to build GT point map
         let mut gt_points_map: HashMap<usize, Vec3<f64>> = HashMap::new();
@@ -466,7 +479,20 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             max_features: 400,
             ..Default::default()
         };
-        Some(Tracker::with_config(config))
+        
+        // Create frontend camera model from backend stereo camera
+        use odysseus_slam_frontend::{PinholeCamera, StereoCamera as FrontendStereoCamera};
+        let frontend_camera = FrontendStereoCamera {
+            left: PinholeCamera {
+                fx: stereo_camera.left.fx as f32,
+                fy: stereo_camera.left.fy as f32,
+                cx: stereo_camera.left.cx as f32,
+                cy: stereo_camera.left.cy as f32,
+            },
+            baseline: stereo_camera.baseline as f32,
+        };
+        
+        Some(Tracker::with_config(config).with_camera(frontend_camera))
     };
 
     // Process first frame to initialize
@@ -475,20 +501,23 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let frame0_obs = if use_synthetic_observations {
         // Get observations from pre-generated data
         frame_observations_arc[0].clone()
-    } else {
-        // Use tracker to get observations
-        let first_frame_num = frame_numbers[0];
-        let left_path = image_dir.join(format!("Image{:04}_L.jpg", first_frame_num));
-        let right_path = image_dir.join(format!("Image{:04}_R.jpg", first_frame_num));
+        } else {
+            // Use tracker to get observations
+            let first_frame_num = frame_numbers[0];
+            let left_path = image_dir.join(format!("Image{:04}_L.jpg", first_frame_num));
+            let right_path = image_dir.join(format!("Image{:04}_R.jpg", first_frame_num));
 
-        let left_img = image::open(&left_path)?.to_luma8();
-        let right_img = image::open(&right_path)?.to_luma8();
+            let left_img = image::open(&left_path)?.to_luma8();
+            let right_img = image::open(&right_path)?.to_luma8();
 
-        let tracks = tracker_opt.as_mut().unwrap().process_frame(&left_img, &right_img);
-        let obs = features_to_observations(&tracks, 0);
-        println!("  Frame 0: {} tracks, {} with stereo", tracks.len(), obs.len());
-        obs
-    };
+            let tracks = tracker_opt.as_mut().unwrap().process_frame(&left_img, &right_img);
+            
+            // No depth feedback for first frame (no prior world state)
+            
+            let obs = features_to_observations(&tracks, 0);
+            println!("  Frame 0: {} tracks, {} with stereo", tracks.len(), obs.len());
+            obs
+        };
 
     if use_synthetic_observations {
         println!("  Frame 0: {} observations from synthetic data", frame0_obs.len());
@@ -526,7 +555,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Visualize ground truth trajectory and tracked feature points
     if let Some(ref poses) = gt_poses {
-        let _ = visualize_ground_truth(&rec, &gt_points_vec, poses, &stereo_camera);
+        visualize_ground_truth(&rec, &gt_points_vec, poses, &stereo_camera)?;
     }
 
     // Visualize initial state
@@ -565,7 +594,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let n_gba_frames = gba_world.frames.len();
             gba_update_count += 1;
 
-            let _ = visualize_gba_update(
+            visualize_gba_update(
                 &rec,
                 gba_update_count,
                 gba_world,
@@ -573,7 +602,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 &gt_points_vec,
                 &stereo_camera,
                 prev_gba_frame_graph.as_ref(),
-            );
+            )?;
 
             prev_gba_frame_graph = Some(gba_result.frame_graph.clone());
             world.replace_frames_from(gba_world);
@@ -618,6 +647,24 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let right_img = image::open(&right_path)?.to_luma8();
 
             let tracks = tracker_opt.as_mut().unwrap().process_frame(&left_img, &right_img);
+            
+            // Extract depth from optimized world state and feed back to tracker
+            let mut depth_updates = HashMap::new();
+            for track in &tracks {
+                if let Some(point) = world.get_point_xyz(track.id) {
+                    // Transform to camera frame to get depth
+                    let cam_point = world.frames[frame_idx - 1].world_to_camera(point);
+                    if cam_point.z > 0.0 {
+                        depth_updates.insert(track.id, cam_point.z as f32);
+                    }
+                }
+            }
+            
+            // Update tracker with backend depths
+            if !depth_updates.is_empty() {
+                tracker_opt.as_mut().unwrap().update_depth_estimates(depth_updates);
+            }
+            
             features_to_observations(&tracks, frame_idx)
         };
 

@@ -53,13 +53,26 @@ fn main() {
 
     println!("Found {} stereo pairs", frame_numbers.len());
 
-    // Create tracker
+    // Create tracker with camera model
     let config = TrackerConfig {
         min_features: 150,
         max_features: 400,
         ..Default::default()
     };
-    let mut tracker = Tracker::with_config(config);
+    
+    // Camera intrinsics (example values, adjust to your camera)
+    use odysseus_slam_frontend::{PinholeCamera, StereoCamera};
+    let camera = StereoCamera {
+        left: PinholeCamera {
+            fx: 500.0,
+            fy: 500.0,
+            cx: 512.0,
+            cy: 384.0,
+        },
+        baseline: 0.1,  // 10cm baseline
+    };
+    
+    let mut tracker = Tracker::with_config(config).with_camera(camera);
 
     // Track feature history for visualization (id -> list of positions)
     let mut track_history: HashMap<usize, Vec<(f32, f32)>> = HashMap::new();
