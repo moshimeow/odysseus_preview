@@ -40,6 +40,8 @@ pub struct TrackerConfig {
     pub lk_config: LKConfig,
     /// Grid cell size for ensuring spatial distribution of new features
     pub grid_size: usize,
+    /// Maximum features allowed per grid cell (Basalt uses 1)
+    pub max_features_per_cell: usize,
     /// Default depth for stereo matching initialization (meters)
     /// Used when backend depth estimates are unavailable
     pub default_stereo_depth: f64,
@@ -60,7 +62,8 @@ impl Default for TrackerConfig {
                 min_eigenvalue: 20.0,   // Stricter: reject tracking if landed on weak texture
                 forward_backward_threshold: 0.2, // Tighter consistency check (Basalt uses 0.2)
             },
-            grid_size: 64,
+            grid_size: 100,  // Larger cells to allow natural clustering
+            max_features_per_cell: 3,  // Allow multiple features per cell, prune only when overcrowded
             default_stereo_depth: 3.0,  // 3 meters reasonable for indoor/outdoor
             epipolar_error_threshold: 1.0,  // Tighter vertical alignment for rectified stereo
         }
@@ -165,6 +168,9 @@ impl Tracker {
 
         // Step 4: Remove features that failed stereo matching for too long
         self.prune_dead_tracks();
+
+        // Step 5: Enforce spatial distribution (max features per cell)
+        self.enforce_spatial_distribution(left_image);
 
         // Step 5: Detect and add new features if below minimum
         if self.tracks.len() < self.config.min_features {
@@ -401,6 +407,54 @@ impl Tracker {
     fn prune_dead_tracks(&mut self) {
         let max_age = self.config.max_age_without_stereo;
         self.tracks.retain(|_, track| track.age <= max_age);
+    }
+
+    /// Enforce spatial distribution by limiting features per grid cell
+    /// When cells are overcrowded, keeps the highest quality features
+    fn enforce_spatial_distribution(&mut self, image: &GrayImage) {
+        let (width, height) = image.dimensions();
+        let grid_size = self.config.grid_size;
+        let max_per_cell = self.config.max_features_per_cell;
+        
+        let grid_width = (width as usize + grid_size - 1) / grid_size;
+        let grid_height = (height as usize + grid_size - 1) / grid_size;
+
+        // Group features by grid cell
+        let mut cells: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        
+        for (&id, track) in &self.tracks {
+            let gx = (track.stereo.left_kp.x as usize) / grid_size;
+            let gy = (track.stereo.left_kp.y as usize) / grid_size;
+            
+            if gx < grid_width && gy < grid_height {
+                cells.entry((gx, gy)).or_insert_with(Vec::new).push(id);
+            }
+        }
+
+        // For each overcrowded cell, keep only the best features
+        let mut to_remove = Vec::new();
+        
+        for ((_gx, _gy), mut feature_ids) in cells {
+            if feature_ids.len() > max_per_cell {
+                // Sort by quality: corner response (descending)
+                feature_ids.sort_by(|&a, &b| {
+                    let response_a = self.tracks[&a].stereo.left_kp.response;
+                    let response_b = self.tracks[&b].stereo.left_kp.response;
+                    response_b.partial_cmp(&response_a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Keep the best max_per_cell features, mark rest for removal
+                for &id in &feature_ids[max_per_cell..] {
+                    to_remove.push(id);
+                }
+            }
+        }
+
+        // Remove lower quality features
+        for id in to_remove {
+            self.tracks.remove(&id);
+            self.feature_depths.remove(&id);
+        }
     }
 
     /// Detect new features in areas without existing tracks
