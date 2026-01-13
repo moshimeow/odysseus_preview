@@ -1,5 +1,5 @@
 use crate::camera::StereoCamera;
-use crate::frame_graph::FrameGraph;
+use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::imu::preintegration::PreintegratedImu;
 use crate::imu::residuals::{bias_residual, imu_preintegration_residual};
@@ -66,6 +66,8 @@ pub struct VioResult {
     pub solve_time_ms: f64,
     /// Optimization graph visualization data
     pub graph_info: Option<OptimizationGraphInfo>,
+    /// New marginalized prior (if frames were marginalized)
+    pub new_prior: Option<super::VioMarginalizedPrior>,
 }
 
 /// Run tightly-coupled VIO bundle adjustment
@@ -73,6 +75,9 @@ pub struct VioResult {
 /// Points with priors (from GBA) are kept fixed for performance, but their
 /// uncertainty is used to scale visual residuals - uncertain points contribute
 /// less to constraining poses.
+///
+/// Inter-keyframe priors provide constraints between consecutive keyframes,
+/// connecting optimized keyframes to fixed keyframes from GBA.
 pub fn run_vio_bundle_adjustment(
     stereo_camera: &StereoCamera<f64>,
     frame_graph: &FrameGraph,
@@ -82,6 +87,7 @@ pub fn run_vio_bundle_adjustment(
     preintegrations: &[PreintegratedImu],
     gravity: [f64; 3],
     point_priors: &PointPriors,
+    inter_keyframe_priors: &[super::VioMarginalizedPrior],
     config: &VioConfig,
 ) -> VioResult {
     let n_frames = world.frames.len();
@@ -155,6 +161,7 @@ pub fn run_vio_bundle_adjustment(
             converged: true,
             solve_time_ms: 0.0,
             graph_info: None,
+            new_prior: None,
         };
     }
 
@@ -198,7 +205,14 @@ pub fn run_vio_bundle_adjustment(
     let n_visual_residuals = visual_obs_filtered.len() * 4;
     let n_imu_residuals = n_imu_factors * 9;
     let n_bias_residuals = n_imu_factors * 6;
-    let n_residuals = n_visual_residuals + n_imu_residuals + n_bias_residuals;
+    
+    // Count inter-keyframe prior residuals
+    let n_prior_residuals: usize = inter_keyframe_priors
+        .iter()
+        .map(|p| p.sqrt_information.nrows())
+        .sum();
+    
+    let n_residuals = n_visual_residuals + n_imu_residuals + n_bias_residuals + n_prior_residuals;
 
     // IMU and Bias entries
     let imu_res_start = n_visual_residuals;
@@ -235,6 +249,20 @@ pub fn run_vio_bundle_adjustment(
                 }
             }
         }
+    }
+
+    // Inter-keyframe prior entries
+    let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
+    let mut current_prior_res_offset = prior_res_start;
+    
+    for prior in inter_keyframe_priors {
+        let entries_for_prior = prior.sparsity_entries(
+            current_prior_res_offset,
+            &pose_to_param_idx,
+            &point_to_param_idx,
+        );
+        entries.extend(entries_for_prior);
+        current_prior_res_offset += prior.sqrt_information.nrows();
     }
 
     entries.sort();
@@ -298,6 +326,10 @@ pub fn run_vio_bundle_adjustment(
                 &gravity,
                 config,
                 point_priors,
+                inter_keyframe_priors,
+                n_visual_residuals,
+                n_imu_residuals,
+                n_bias_residuals,
             );
         },
         |iter, res, _| {
@@ -362,12 +394,145 @@ pub fn run_vio_bundle_adjustment(
         None
     };
 
+    // ========== 7. Marginalize frames if requested ==========
+    let marginalized_frame_indices: Vec<usize> = frame_graph
+        .states
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.state == OptimizationState::Marginalize)
+        .map(|(idx, _)| idx)
+        .collect();
+
+    let new_prior = if !marginalized_frame_indices.is_empty() {
+        // Need to compute Jacobian at optimized params for marginalization
+        use odysseus_solver::sparse_solver::build_jacobian;
+        
+        // Rebuild sparsity entries (same as used in optimization)
+        let mut entries = Vec::new();
+        
+        // Visual entries
+        for (obs_idx, obs) in visual_obs_filtered.iter().enumerate() {
+            let res_idx = obs_idx * 4;
+            let opt_pose = pose_to_param_idx.contains_key(&obs.camera_id);
+            let opt_point = point_to_param_idx.contains_key(&obs.point_id);
+            
+            if let Some(&p_idx) = pose_to_param_idx.get(&obs.camera_id) {
+                if opt_pose {
+                    for i in 0..6 {
+                        for r in 0..4 {
+                            entries.push((res_idx + r, p_idx + i));
+                        }
+                    }
+                }
+            }
+            if let Some(&pt_idx) = point_to_param_idx.get(&obs.point_id) {
+                if opt_point {
+                    for i in 0..3 {
+                        for r in 0..4 {
+                            entries.push((res_idx + r, pt_idx + i));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // IMU entries
+        let n_imu_factors = n_frames - 1;
+        let n_visual_residuals = visual_obs_filtered.len() * 4;
+        let imu_res_start = n_visual_residuals;
+        
+        for i in 0..n_imu_factors {
+            let res_base = imu_res_start + i * 9;
+            let bias_res_base = imu_res_start + (n_frames - 1) * 9 + i * 6;
+            
+            if let Some(&p_i) = pose_to_param_idx.get(&i) {
+                for p in 0..15 {
+                    for r in 0..9 {
+                        entries.push((res_base + r, p_i + p));
+                    }
+                }
+                for p in 9..15 {
+                    for r in 0..6 {
+                        entries.push((bias_res_base + r, p_i + p));
+                    }
+                }
+            }
+            if let Some(&p_j) = pose_to_param_idx.get(&(i + 1)) {
+                for p in 0..15 {
+                    for r in 0..9 {
+                        entries.push((res_base + r, p_j + p));
+                    }
+                }
+                for p in 9..15 {
+                    for r in 0..6 {
+                        entries.push((bias_res_base + r, p_j + p));
+                    }
+                }
+            }
+        }
+        
+        entries.sort();
+        entries.dedup();
+        
+        let marg_n_imu_residuals = n_imu_factors * 9;
+        let marg_n_bias_residuals = n_imu_factors * 6;
+        let n_residuals = n_visual_residuals + marg_n_imu_residuals + marg_n_bias_residuals;
+        let mut jacobian = build_jacobian::<f64>(&entries, n_residuals, n_params);
+        let mut residuals = vec![0.0; n_residuals];
+        
+        // Recompute cost at optimized params to get Jacobian (no inter-keyframe priors for fresh marginalization)
+        compute_vio_cost(
+            &optimized,
+            &mut residuals,
+            jacobian.data_mut(),
+            world,
+            &visual_obs_filtered,
+            imu_states,
+            preintegrations,
+            &pose_to_param_idx,
+            &point_to_param_idx,
+            stereo_camera,
+            &gravity,
+            config,
+            point_priors,
+            &[], // No inter-keyframe priors when computing fresh marginalization
+            n_visual_residuals,
+            marg_n_imu_residuals,
+            marg_n_bias_residuals,
+        );
+        
+        // Get observing poses for each point (for marginalization logic)
+        let get_observing_poses = |point_id: usize| -> HashSet<usize> {
+            frame_observations
+                .iter()
+                .enumerate()
+                .filter(|(_, obs_list)| obs_list.iter().any(|o| o.point_id == point_id))
+                .map(|(frame_idx, _)| frame_idx)
+                .collect()
+        };
+        
+        // Compute marginalization using 15 params per pose
+        super::compute_marginalization(
+            &jacobian,
+            &optimized,
+            15, // params_per_pose for VIO
+            n_params,
+            &pose_to_param_idx,
+            &point_to_param_idx,
+            &marginalized_frame_indices,
+            get_observing_poses,
+        )
+    } else {
+        None
+    };
+
     VioResult {
         final_error,
         iterations: iteration_count,
         converged,
         solve_time_ms,
         graph_info,
+        new_prior,
     }
 }
 
@@ -386,6 +551,10 @@ fn compute_vio_cost(
     gravity: &[f64; 3],
     config: &VioConfig,
     point_priors: &PointPriors,
+    inter_keyframe_priors: &[super::VioMarginalizedPrior],
+    n_visual_residuals: usize,
+    n_imu_residuals: usize,
+    n_bias_residuals: usize,
 ) {
     let mut jac_cursor = 0;
 
@@ -716,6 +885,23 @@ fn compute_vio_cost(
             }
         }
     }
+
+    // 4. Inter-Keyframe Prior Cost
+    let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
+    let mut current_prior_res_offset = prior_res_start;
+    
+    for prior in inter_keyframe_priors {
+        jac_cursor = prior.apply_to_cost(
+            params,
+            residuals,
+            jacobian_data,
+            jac_cursor,
+            current_prior_res_offset,
+            pose_to_param_idx,
+            point_to_param_idx,
+        );
+        current_prior_res_offset += prior.sqrt_information.nrows();
+    }
 }
 
 use crate::imu::preintegration::{VisuallyInformedPreintegration, Matrix15};
@@ -939,6 +1125,10 @@ pub fn extract_relative_pose_constraints(
         &gravity,
         config,
         point_priors,
+        &[], // No inter-keyframe priors when extracting relative pose constraints
+        n_visual_residuals,
+        n_imu_residuals,
+        n_bias_residuals,
     );
 
     // ========== 5. Compute Hessian H = J^T * J ==========

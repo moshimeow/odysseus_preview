@@ -166,6 +166,11 @@ impl SlamMarginalization {
     }
 }
 
+/// VIO-specific marginalized prior type alias (15 params per pose)
+/// This is the same as SlamMarginalization but semantically represents
+/// VIO priors with [rot(3), trans(3), vel(3), gyro_bias(3), accel_bias(3)]
+pub type VioMarginalizedPrior = SlamMarginalization;
+
 /// Result of marginalization computation
 pub struct MarginalizationResult {
     /// New prior from marginalized parameters

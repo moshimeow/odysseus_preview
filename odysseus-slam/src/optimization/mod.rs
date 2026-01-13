@@ -23,7 +23,7 @@ pub use slam::{
 };
 
 // Re-export shared problem types
-pub use marginalization::{compute_marginalization, SlamMarginalization};
+pub use marginalization::{compute_marginalization, SlamMarginalization, VioMarginalizedPrior};
 
 // Re-export graph visualization types
 pub use graph_visualization::{visualize_optimization_graph, OptimizationGraphInfo, PointState};

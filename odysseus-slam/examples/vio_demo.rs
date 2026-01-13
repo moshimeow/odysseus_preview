@@ -18,8 +18,8 @@ use odysseus_slam::{
     geometry::{Point3D, StereoObservation},
     imu::{simulator::ImuNoiseParams, ImuFrameState, ImuSimulator, PreintegratedImu},
     math::SE3,
-    optimization::vio::{extract_relative_pose_constraints, run_vio_bundle_adjustment, VioConfig},
-    optimization::PointPriors,
+    optimization::vio::{run_vio_bundle_adjustment, VioConfig},
+    optimization::{PointPriors, VioMarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     spline::BezierSplineTrajectory,
     trajectory::ContinuousTrajectory,
@@ -233,6 +233,12 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_gba_frame_graph: Option<FrameGraph> = None;
     let mut last_keyframe_position: Vec3<f64> = Vec3::new(0.0, 0.0, 0.0);
     let mut gba_point_priors: PointPriors = PointPriors::new();
+    
+    // Inter-keyframe prior tracking
+    // These connect consecutive keyframes and are used as constraints in LBA
+    let mut inter_keyframe_priors: Vec<VioMarginalizedPrior> = Vec::new();
+    let mut last_keyframe_idx: usize = 0; // Track the most recent keyframe index
+    let mut pending_prior: Option<VioMarginalizedPrior> = None; // Accumulating prior for current keyframe
 
     // Metrics tracking for LBA/GBA interaction analysis
     let mut cumulative_position_error = 0.0;
@@ -470,13 +476,19 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Mark GBA-optimized frames appropriately
+        // Mark GBA-optimized frames appropriately and clean up inter-keyframe priors
         if let Some(gba_frame) = gba_last_optimized_frame {
             if let Some(frame_state) = frame_graph.get(gba_frame) {
                 if frame_state.role != FrameRole::Keyframe {
                     frame_graph.set_role(gba_frame, FrameRole::Stored);
                 }
             }
+            
+            // Drop inter-keyframe priors where both endpoints are now fixed by GBA
+            inter_keyframe_priors.retain(|prior| {
+                // Keep if at least one pose is still optimized (not fixed by GBA)
+                prior.pose_ids.iter().any(|&pose_id| pose_id > gba_frame)
+            });
         }
 
         // Get initial guess from previous pose (with simulated tracking error)
@@ -543,7 +555,7 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         preintegrations.push(preint);
 
         // Triangulate new points only on keyframes
-        let mut new_points = 0;
+        let mut _new_points = 0;
         if should_create_keyframe {
             println!(
                 "  Creating keyframe from frame {} (novelty: {:.1}%, baseline: {:.3}m)",
@@ -554,40 +566,48 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             for obs in current_obs.iter() {
                 if world.get_point(obs.point_id).is_none() {
                     world.triangulate_and_add_point(obs, &stereo_camera, frame_idx);
-                    new_points += 1;
+                    _new_points += 1;
                 }
             }
             last_keyframe_position = current_position;
         }
 
-        // Manage sliding window
-        let mut optimized_count = frame_graph
+        // Manage window: marginalize old intermediate frames between keyframes
+        // Keep ALL keyframes until GBA processes them
+        let gba_last_frame = gba_last_optimized_frame.unwrap_or(0);
+        
+        // Mark frames as Fixed if GBA has processed them
+        for i in 0..=gba_last_frame.min(frame_graph.len() - 1) {
+            if frame_graph.states[i].state == OptimizationState::Optimized {
+                frame_graph.set_state(i, OptimizationState::Fixed);
+            }
+        }
+        
+        // Marginalize intermediate (non-keyframe) frames to maintain window size
+        // This only affects frames between keyframes, not the keyframes themselves
+        let mut optimized_non_keyframe_count = frame_graph
             .states
             .iter()
-            .filter(|s| s.state == OptimizationState::Optimized)
+            .filter(|s| s.state == OptimizationState::Optimized && s.role != FrameRole::Keyframe)
             .count();
 
-        while optimized_count > WINDOW_SIZE {
-            // Find oldest optimized frame and mark as inactive
+        while optimized_non_keyframe_count > WINDOW_SIZE {
+            // Find oldest optimized non-keyframe and mark for marginalization
             for i in 0..frame_graph.len() {
-                if frame_graph.states[i].state == OptimizationState::Optimized {
-                    frame_graph.set_state(i, OptimizationState::Inactive);
+                if frame_graph.states[i].state == OptimizationState::Optimized 
+                    && frame_graph.states[i].role != FrameRole::Keyframe {
+                    frame_graph.set_state(i, OptimizationState::Marginalize);
                     break;
                 }
             }
-            optimized_count -= 1;
+            optimized_non_keyframe_count -= 1;
         }
-
-        // Fix only frame 0 as the single gauge anchor
-        // Don't fix additional keyframes - let VIO optimize relative to frame 0 only
-        // This avoids discontinuities when GBA updates change which keyframes are fixed
-        frame_graph.set_state(0, OptimizationState::Fixed);
 
         // VIO now uses point priors from GBA as soft constraints
         // Points with priors are optimized, not fixed, but have prior residuals
         // that pull them towards their GBA-optimized positions with appropriate uncertainty
 
-        // Run VIO optimization on current window
+        // Run VIO optimization on current window with inter-keyframe priors
         let result = run_vio_bundle_adjustment(
             &stereo_camera,
             &frame_graph,
@@ -597,11 +617,25 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             &preintegrations,
             gravity_vec,
             &gba_point_priors,
+            &inter_keyframe_priors,
             &config,
         );
 
         let vio_time = result.solve_time_ms;
         total_vio_time += vio_time;
+
+        // Handle marginalization result
+        if let Some(new_prior) = result.new_prior {
+            // Update or create pending prior
+            pending_prior = Some(new_prior);
+        }
+
+        // Mark marginalized frames as inactive now that marginalization is done
+        for i in 0..frame_graph.len() {
+            if frame_graph.states[i].state == OptimizationState::Marginalize {
+                frame_graph.set_state(i, OptimizationState::Inactive);
+            }
+        }
 
         // Get optimized pose for error checking
         let optimized_pose = world.frames[frame_idx].world_pose();
@@ -674,76 +708,34 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Extract relative pose constraints from converged VIO result
-        // This recomputes the Jacobian at the final solution and extracts posterior covariance
-        let constraints = extract_relative_pose_constraints(
-            &stereo_camera,
-            &frame_graph,
-            &world,
-            &frame_observations,
-            &imu_states,
-            &preintegrations,
-            gravity_vec,
-            &gba_point_priors,
-            &config,
-        );
-
-        // Log constraint covariance statistics
-        if !constraints.is_empty() {
-            // Compute covariance magnitudes (trace of position and rotation blocks)
-            let mut pos_cov_traces: Vec<f64> = Vec::new();
-            let mut rot_cov_traces: Vec<f64> = Vec::new();
-
-            for c in &constraints {
-                // Covariance is 15x15: [rotation(3), velocity(3), position(3), gyro_bias(3), accel_bias(3)]
-                // Rotation block is rows/cols 0-2, velocity 3-5, position 6-8
-                let rot_trace = c.covariance_posterior[(0, 0)] + c.covariance_posterior[(1, 1)] + c.covariance_posterior[(2, 2)];
-                let pos_trace = c.covariance_posterior[(6, 6)] + c.covariance_posterior[(7, 7)] + c.covariance_posterior[(8, 8)];
-                rot_cov_traces.push(rot_trace);
-                pos_cov_traces.push(pos_trace);
+        // Handle inter-keyframe prior for keyframes
+        let inter_kf_prior_to_send = if should_create_keyframe {
+            // This frame is a keyframe - finalize the pending prior
+            let prior = pending_prior.take();
+            
+            // Add the prior to our list for use in LBA
+            if let Some(ref p) = prior {
+                inter_keyframe_priors.push(p.clone());
+                
+                // Drop priors where both endpoints are now fixed by GBA
+                let gba_last = gba_last_optimized_frame.unwrap_or(0);
+                inter_keyframe_priors.retain(|p| {
+                    // Keep if at least one pose is still optimized (not fixed by GBA)
+                    p.pose_ids.iter().any(|&pose_id| pose_id > gba_last)
+                });
             }
-
-            // Log constraint covariance metrics
-            if let Some(constraint) = constraints.iter().find(|c| c.frame_j == frame_idx) {
-                let rot_trace = constraint.covariance_posterior[(0, 0)]
-                    + constraint.covariance_posterior[(1, 1)]
-                    + constraint.covariance_posterior[(2, 2)];
-                let pos_trace = constraint.covariance_posterior[(6, 6)]
-                    + constraint.covariance_posterior[(7, 7)]
-                    + constraint.covariance_posterior[(8, 8)];
-
-                // Convert to standard deviation (sqrt of variance trace / 3)
-                let pos_std = (pos_trace / 3.0).sqrt();
-                let rot_std_rad = (rot_trace / 3.0).sqrt();
-                let rot_std_deg = rot_std_rad.to_degrees();
-
-                let _ = rec.log(
-                    "metrics/constraint/position_std_m",
-                    &rr::Scalars::new([pos_std]),
-                );
-                let _ = rec.log(
-                    "metrics/constraint/rotation_std_deg",
-                    &rr::Scalars::new([rot_std_deg]),
-                );
-                let _ = rec.log(
-                    "metrics/constraint/position_cov_trace",
-                    &rr::Scalars::new([pos_trace]),
-                );
-                let _ = rec.log(
-                    "metrics/constraint/rotation_cov_trace",
-                    &rr::Scalars::new([rot_trace]),
-                );
-            }
-        }
-
-        // Find the constraint for this frame (frame_j == frame_idx)
-        let constraint_for_frame = constraints.into_iter().find(|c| c.frame_j == frame_idx);
+            
+            last_keyframe_idx = frame_idx;
+            prior
+        } else {
+            None
+        };
 
         // Get IMU state for this frame
         let imu_state_for_frame = imu_states.get(frame_idx).cloned();
 
-        // Send frame to GBA with visually-informed constraint
-        slam_system.send_to_gba(frame_idx, &world, constraint_for_frame, imu_state_for_frame);
+        // Send frame to GBA with inter-keyframe prior (if this is a keyframe)
+        slam_system.send_to_gba(frame_idx, &world, inter_kf_prior_to_send, imu_state_for_frame);
 
         // Visualize current state
         visualize_estimate(
@@ -757,7 +749,7 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         prev_frame_graph = Some(frame_graph.clone());
 
-        let frame_duration = frame_start.elapsed();
+        let _frame_duration = frame_start.elapsed();
         let n_optimized = frame_graph
             .states
             .iter()

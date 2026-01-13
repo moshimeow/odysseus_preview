@@ -9,9 +9,9 @@
 use crate::camera::StereoCamera;
 use crate::frame_graph::{FrameGraph, FrameRole, OptimizationState};
 use crate::geometry::StereoObservation;
-use crate::imu::{ImuFrameState, VisuallyInformedPreintegration};
+use crate::imu::ImuFrameState;
 use crate::optimization::{
-    run_bundle_adjustment, run_gba_with_imu_constraints, BundleAdjustmentConfig, PointPriors,
+    run_bundle_adjustment, BundleAdjustmentConfig, PointPriors,
 };
 use crate::world_state::WorldState;
 use std::collections::HashSet;
@@ -29,11 +29,10 @@ pub struct VioLbaToGbaMsg {
     pub frame: WorldFrame,
     /// Index of this frame in the world state
     pub frame_index: usize,
-    /// Visually-informed IMU preintegration from LBA/VIO optimization.
-    /// Contains the pose-invariant preintegration along with posterior estimates
-    /// and covariance incorporating visual constraints. This allows GBA to maintain
-    /// IMU dynamics when adjusting poses.
-    pub visually_informed_preintegration: Option<VisuallyInformedPreintegration>,
+    /// Inter-keyframe marginalized prior (when a keyframe is finalized).
+    /// This connects the previous keyframe to this keyframe, capturing
+    /// IMU dynamics and visual constraints from intermediate frames.
+    pub inter_keyframe_prior: Option<crate::optimization::VioMarginalizedPrior>,
     /// IMU state (velocity, biases) for this frame from VIO optimization.
     /// Used by GBA for full VIO optimization.
     pub imu_state: Option<ImuFrameState>,
@@ -47,7 +46,7 @@ pub struct VioGbaToLbaMsg {
     /// GBA's frame graph (for visualization/debugging)
     pub frame_graph: FrameGraph,
     /// Index of the most recent frame GBA optimized (for gauge fixing)
-    /// This is typically the window frame, not a keyframe
+    /// LBA will mark this and all earlier keyframes as Fixed
     pub last_optimized_frame: usize,
     /// Point priors (positions + information matrices) for LBA to use as soft constraints
     /// Instead of fixing GBA points, LBA treats them as priors with uncertainty
@@ -102,19 +101,19 @@ impl VioSlamSystem {
     /// # Arguments
     /// * `frame_index` - Index of the frame to send
     /// * `world` - Current world state (only the specified frame is extracted)
-    /// * `visually_informed_preintegration` - Optional visually-informed preintegration from VIO
+    /// * `inter_keyframe_prior` - Optional inter-keyframe prior (when keyframe is finalized)
     /// * `imu_state` - Optional IMU state (velocity, biases) from VIO
     pub fn send_to_gba(
         &self,
         frame_index: usize,
         world: &WorldState,
-        visually_informed_preintegration: Option<VisuallyInformedPreintegration>,
+        inter_keyframe_prior: Option<crate::optimization::VioMarginalizedPrior>,
         imu_state: Option<ImuFrameState>,
     ) {
         let msg = VioLbaToGbaMsg {
             frame: world.frames[frame_index].clone(),
             frame_index,
-            visually_informed_preintegration,
+            inter_keyframe_prior,
             imu_state,
         };
         // Ignore send errors (GBA thread may have exited)
@@ -162,9 +161,9 @@ fn vio_gba_thread_loop(
     let mut gba_graph = FrameGraph::new();
 
     // IMU/VIO state from LBA - used for VIO-GBA integration
-    // - visually_informed_preintegrations contain pose-invariant preintegrations with posteriors
+    // - inter_keyframe_priors connect consecutive keyframes with marginalized information
     // - imu_states contain velocity/biases that GBA uses as initial estimates
-    let mut visually_informed_preintegrations: Vec<Option<VisuallyInformedPreintegration>> = Vec::new();
+    let mut inter_keyframe_priors: Vec<crate::optimization::VioMarginalizedPrior> = Vec::new();
     let mut imu_states: Vec<Option<ImuFrameState>> = Vec::new();
 
     loop {
@@ -207,7 +206,9 @@ fn vio_gba_thread_loop(
                     world.add_frame(msg.frame);
 
                     // Store IMU/VIO data for VIO-GBA integration
-                    visually_informed_preintegrations.push(msg.visually_informed_preintegration);
+                    if let Some(prior) = msg.inter_keyframe_prior {
+                        inter_keyframe_priors.push(prior);
+                    }
                     imu_states.push(msg.imu_state);
                 }
             } else {
@@ -218,8 +219,7 @@ fn vio_gba_thread_loop(
                 gba_world = Some(world);
                 gba_graph.add_frame(FrameRole::Keyframe, OptimizationState::Fixed);
 
-                // First frame has no preintegration/imu_state
-                visually_informed_preintegrations.push(None);
+                // First frame has no prior/imu_state
                 imu_states.push(msg.imu_state);
             }
         }
@@ -252,26 +252,11 @@ fn vio_gba_thread_loop(
 
             // currently no maximum number of keyframes.
 
-            // Check if we have visually-informed preintegrations available
-            let has_preintegrations = visually_informed_preintegrations.iter().any(|p| p.is_some());
-
-            let point_priors = if has_preintegrations {
-                // Run GBA with visually-informed IMU preintegrations
-                // Gravity in RDF (Right, Down, Forward) coordinates: Y is down
-                let gravity = [0.0, 9.81, 0.0];
-                let result = run_gba_with_imu_constraints(
-                    &stereo_camera,
-                    &gba_graph,
-                    world,
-                    &frame_observations,
-                    &mut imu_states,
-                    &visually_informed_preintegrations,
-                    gravity,
-                    &BundleAdjustmentConfig::gba(),
-                );
-                result.point_priors
-            } else {
-                // Fall back to visual-only BA
+            // Note: For now, GBA will just use visual-only BA
+            // TODO: Implement full VIO-GBA with inter-keyframe priors
+            // The inter_keyframe_priors are stored but not yet used by GBA
+            // GBA optimization with inter-keyframe priors will be implemented separately
+            let point_priors = {
                 run_bundle_adjustment(
                     &stereo_camera,
                     &gba_graph,
