@@ -6,31 +6,82 @@
 
 use crate::camera::StereoCamera;
 use crate::geometry::{Point3D, StereoObservation};
-use crate::math::SE3;
+use crate::math::{stereographic, SE3};
 use std::collections::HashMap;
 use odysseus_solver::math3d::Vec3;
 
-/// Point information with observation tracking
+/// Point information with inverse depth parameterization
+///
+/// Points are stored relative to a host pose using:
+/// - 2D bearing direction (via stereographic projection)
+/// - Inverse depth (ρ = 1/distance)
+/// - Host pose (the keyframe where point was first seen)
+///
+/// This parameterization is more numerically stable than Cartesian coordinates,
+/// especially for distant points or points with high depth uncertainty.
 #[derive(Debug, Clone)]
 pub struct PointInfo {
-    /// Point position in world coordinates
-    pub position: Vec3<f64>,
+    /// 2D bearing direction (stereographic projection of unit bearing)
+    pub direction: (f64, f64),
+    
+    /// Inverse depth from host pose (ρ = 1/distance)
+    pub inv_depth: f64,
+    
+    /// Host pose (fixed anchor for the parameterization)
+    /// This is the pose of the keyframe where the point was first triangulated
+    pub host_pose: SE3<f64>,
+    
     /// Last frame index where this point was observed
     pub last_observed_frame: usize,
+    
     /// Number of times this point has been observed
     pub observation_count: usize,
 }
 
 impl PointInfo {
-    /// Create a new point info
-    pub fn new(position: Vec3<f64>, first_observed_frame: usize) -> Self {
+    /// Create a new point from world coordinates
+    ///
+    /// Converts from world XYZ to inverse depth parameterization relative to host pose
+    pub fn new(world_position: Vec3<f64>, first_observed_frame_pose: SE3<f64>, first_observed_frame: usize) -> Self {
+        // Transform to host frame
+        let host_point = first_observed_frame_pose.inverse().transform_point(world_position);
+        
+        // Compute distance and inverse depth
+        let distance = host_point.norm();
+        let inv_depth = 1.0 / distance;
+        
+        // Normalize to unit bearing and project to 2D
+        let bearing = host_point / distance;
+        let direction = stereographic::project(bearing);
+        
         Self {
-            position,
+            direction,
+            inv_depth,
+            host_pose: first_observed_frame_pose,
             last_observed_frame: first_observed_frame,
             observation_count: 1,
         }
     }
-
+    
+    /// Convert to world position (for visualization and interfacing with non-inverse-depth code)
+    pub fn to_world_position(&self) -> Vec3<f64> {
+        // Unproject 2D direction to 3D unit bearing
+        let bearing = stereographic::unproject(self.direction.0, self.direction.1);
+        
+        // Scale by distance (1/inv_depth)
+        let distance = 1.0 / self.inv_depth;
+        let host_point = bearing * distance;
+        
+        // Transform from host frame to world
+        self.host_pose.transform_point(host_point)
+    }
+    
+    /// Update the inverse depth parameters after optimization
+    pub fn update_from_params(&mut self, direction: (f64, f64), inv_depth: f64) {
+        self.direction = direction;
+        self.inv_depth = inv_depth;
+    }
+    
     /// Update when point is observed again
     pub fn observe(&mut self, frame_idx: usize) {
         self.last_observed_frame = frame_idx;
@@ -213,8 +264,8 @@ impl WorldState {
 
     /// Triangulate a stereo observation and add the point in inverse depth form
     ///
-    /// This converts pixel coordinates directly to inverse depth without
-    /// constructing intermediate 3D points.
+    /// Triangulates the point in world coordinates, then converts to inverse depth
+    /// parameterization relative to the current keyframe's pose (which becomes the host).
     ///
     /// # Arguments
     /// * `obs` - Stereo observation to triangulate
@@ -258,13 +309,20 @@ impl WorldState {
         let distance = z_depth * ray_length;
 
         // Point in camera frame
-        let camera_point = Vec3::new(ray_x * distance / ray_length, ray_y * distance / ray_length, ray_z * distance / ray_length);
+        let camera_point = Vec3::new(
+            ray_x * distance / ray_length,
+            ray_y * distance / ray_length,
+            ray_z * distance / ray_length
+        );
 
         // Transform to world coordinates
         let world_point = self.frames[keyframe_idx].camera_to_world(camera_point);
 
-        // Store the point
-        let point_info = PointInfo::new(world_point, keyframe_idx);
+        // Get host pose (the current keyframe's pose)
+        let host_pose = self.frames[keyframe_idx].world_pose();
+
+        // Store the point in inverse depth form
+        let point_info = PointInfo::new(world_point, host_pose, keyframe_idx);
         self.frames[keyframe_idx].points.insert(obs.point_id, point_info);
         self.point_to_keyframe.insert(obs.point_id, keyframe_idx);
         if obs.point_id >= self.next_point_id {
@@ -280,14 +338,39 @@ impl WorldState {
         let keyframe_idx = self.point_to_keyframe.get(&point_id)?;
         let frame = &self.frames[*keyframe_idx];
         let point_info = frame.points.get(&point_id)?;
-        Some(point_info.position)
+        Some(point_info.to_world_position())
     }
 
     /// Update a point's position from world coordinates
+    ///
+    /// This converts world coordinates back to inverse depth relative to the host pose
     pub fn update_point_xyz(&mut self, point_id: usize, new_world_position: Point3D<f64>) {
         if let Some(&keyframe_idx) = self.point_to_keyframe.get(&point_id) {
             if let Some(point_info) = self.frames[keyframe_idx].points.get_mut(&point_id) {
-                point_info.position = new_world_position;
+                // Convert world position to inverse depth relative to host
+                let host_point = point_info.host_pose.inverse().transform_point(new_world_position);
+                let distance = host_point.norm();
+                let inv_depth = 1.0 / distance;
+                let bearing = host_point / distance;
+                let direction = stereographic::project(bearing);
+                
+                point_info.direction = direction;
+                point_info.inv_depth = inv_depth;
+            }
+        }
+    }
+    
+    /// Get the PointInfo struct directly (for optimization access)
+    pub fn get_point_info(&self, point_id: usize) -> Option<&PointInfo> {
+        let keyframe_idx = self.point_to_keyframe.get(&point_id)?;
+        self.frames[*keyframe_idx].points.get(&point_id)
+    }
+    
+    /// Update a point's inverse depth parameters after optimization
+    pub fn update_point_params(&mut self, point_id: usize, direction: (f64, f64), inv_depth: f64) {
+        if let Some(&keyframe_idx) = self.point_to_keyframe.get(&point_id) {
+            if let Some(point_info) = self.frames[keyframe_idx].points.get_mut(&point_id) {
+                point_info.update_from_params(direction, inv_depth);
             }
         }
     }
@@ -344,8 +427,11 @@ impl WorldState {
     ///
     /// This is a helper for backward compatibility methods.
     fn add_point_xyz(&mut self, point_id: usize, keyframe_idx: usize, world_point: Point3D<f64>) {
-        // Store the point directly
-        let point_info = PointInfo::new(world_point, keyframe_idx);
+        // Get host pose for inverse depth parameterization
+        let host_pose = self.frames[keyframe_idx].world_pose();
+        
+        // Store the point in inverse depth form
+        let point_info = PointInfo::new(world_point, host_pose, keyframe_idx);
         self.frames[keyframe_idx].points.insert(point_id, point_info);
         self.point_to_keyframe.insert(point_id, keyframe_idx);
         if point_id >= self.next_point_id {
@@ -423,7 +509,7 @@ impl WorldState {
         for (point_id, keyframe_idx) in &self.point_to_keyframe {
             let keyframe_idx = *keyframe_idx;
             if let Some(point_info) = self.frames[keyframe_idx].points.get(point_id) {
-                result.push((*point_id, point_info.position));
+                result.push((*point_id, point_info.to_world_position()));
             }
         }
         result

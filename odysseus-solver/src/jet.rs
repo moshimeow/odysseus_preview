@@ -17,6 +17,15 @@ pub struct Jet<T, const N: usize> {
     pub derivs: [T; N],
 }
 
+impl<T: Copy + Default, const N: usize> Default for Jet<T, N> {
+    fn default() -> Self {
+        Self {
+            value: T::default(),
+            derivs: [T::default(); N],
+        }
+    }
+}
+
 impl<T: Copy + Default, const N: usize> Jet<T, N> {
     /// Create a constant (zero derivatives)
     pub fn constant(value: T) -> Self {
@@ -251,6 +260,7 @@ impl_jet_math!(f64, 1e-16_f64);
 /// that works with or without automatic differentiation.
 pub trait Real:
     Copy
+    + Default
     + Add<Output = Self>
     + Sub<Output = Self>
     + Mul<Output = Self>
@@ -258,7 +268,7 @@ pub trait Real:
     + Neg<Output = Self>
     + Sized
 {
-    type Scalar: Copy;
+    type Scalar: Copy + Default;
 
     fn sin(self) -> Self;
     fn cos(self) -> Self;

@@ -100,8 +100,20 @@ impl<T: Real> std::ops::Mul<T> for Vec3<T> {
     }
 }
 
+impl<T: Real> std::ops::Div<T> for Vec3<T> {
+    type Output = Self;
+
+    fn div(self, scalar: T) -> Self {
+        Self {
+            x: self.x / scalar,
+            y: self.y / scalar,
+            z: self.z / scalar,
+        }
+    }
+}
+
 // Note: RHS multiplication (scalar * Vec3) is tricky with generics and orphan rules.
-// For now, we only provide Vec3 * scalar.
+// For now, we only provide Vec3 * scalar and Vec3 / scalar.
 
 // ============================================================================
 // Mat3 - 3x3 Matrix (column-major)

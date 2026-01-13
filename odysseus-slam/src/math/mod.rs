@@ -2,6 +2,7 @@
 
 mod so3;
 mod se3;
+pub mod stereographic;
 
 pub use so3::SO3;
 pub use se3::SE3;

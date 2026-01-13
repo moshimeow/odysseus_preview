@@ -157,15 +157,97 @@ pub(crate) fn get_point_xyz(
     world: &WorldState,
 ) -> [f64; 3] {
     if let Some(&param_idx) = point_to_param_idx.get(&point_id) {
-        [
-            params[param_idx],
-            params[param_idx + 1],
-            params[param_idx + 2],
-        ]
+        // Point is optimized - get from params (inverse depth representation)
+        let pt_info = world.get_point_info(point_id).unwrap();
+        
+        // Unproject 2D direction to 3D unit bearing
+        let direction_u = params[param_idx];
+        let direction_v = params[param_idx + 1];
+        let inv_depth = params[param_idx + 2];
+        
+        let bearing = crate::math::stereographic::unproject(direction_u, direction_v);
+        
+        // Scale by distance
+        let distance = 1.0 / inv_depth;
+        let point_host = bearing * distance;
+        
+        // Transform from host to world
+        let point_world = pt_info.host_pose.transform_point(point_host);
+        [point_world.x, point_world.y, point_world.z]
     } else {
+        // Point is fixed - get from world state
         let point = world.get_point(point_id).unwrap();
         [point.x, point.y, point.z]
     }
+}
+
+/// Compute stereo reprojection residual for inverse depth parameterized point
+///
+/// The point is parameterized as:
+/// - direction: 2D stereographic projection of unit bearing from host pose
+/// - inv_depth: inverse distance from host pose
+/// - host_pose: fixed anchor pose (from PointInfo)
+///
+/// # Arguments
+/// * `camera_rotation_host` - Host quaternion for camera pose (host-relative parameterization)
+/// * `camera_pose_params` - Camera pose parameters [rotation_delta(3), translation(3)]
+/// * `point_params` - Point parameters [direction_u, direction_v, inv_depth]
+/// * `point_host_pose` - Host pose for the point (fixed, stored in PointInfo)
+/// * `stereo_camera` - Stereo camera model
+/// * `observed_*` - Observed pixel coordinates
+///
+/// # Returns
+/// Tuple of 4 residuals (left_u, left_v, right_u, right_v)
+pub fn stereo_reprojection_residual_inverse_depth<T: Real>(
+    camera_rotation_host: &odysseus_solver::math3d::Quat<f64>,
+    camera_pose_params: &[T; 6], // [rotation_delta (3), translation (3)]
+    point_params: &[T; 3],        // [direction_u, direction_v, inv_depth]
+    point_host_pose: &SE3<f64>,   // Fixed host pose from PointInfo
+    stereo_camera: &StereoCamera<T>,
+    observed_left_u: T,
+    observed_left_v: T,
+    observed_right_u: T,
+    observed_right_v: T,
+) -> (T, T, T, T) {
+    // 1. Unproject 2D direction to 3D unit bearing in host frame
+    let bearing_host = crate::math::stereographic::unproject_jet::<T, 9>([point_params[0], point_params[1]]);
+    
+    // 2. Scale by distance (1 / inv_depth) to get 3D point in host frame
+    let distance = T::one() / point_params[2];
+    let point_host_x = bearing_host[0] * distance;
+    let point_host_y = bearing_host[1] * distance;
+    let point_host_z = bearing_host[2] * distance;
+    
+    // 3. Transform from point's host frame to world frame
+    // point_host_pose components (f64) -> T
+    let host_quat_t = odysseus_solver::math3d::Quat::new(
+        T::from_literal(point_host_pose.rotation.quat.w),
+        T::from_literal(point_host_pose.rotation.quat.x),
+        T::from_literal(point_host_pose.rotation.quat.y),
+        T::from_literal(point_host_pose.rotation.quat.z),
+    );
+    let host_trans_t = Vec3::new(
+        T::from_literal(point_host_pose.translation.x),
+        T::from_literal(point_host_pose.translation.y),
+        T::from_literal(point_host_pose.translation.z),
+    );
+    
+    let point_host_vec = Vec3::new(point_host_x, point_host_y, point_host_z);
+    let point_world = host_quat_t.rotate_vec(point_host_vec) + host_trans_t;
+    
+    // 4. Now use standard residual computation (world point -> camera -> image)
+    let world_point = [point_world.x, point_world.y, point_world.z];
+    
+    stereo_reprojection_residual_host_relative(
+        camera_rotation_host,
+        camera_pose_params,
+        &world_point,
+        stereo_camera,
+        observed_left_u,
+        observed_left_v,
+        observed_right_u,
+        observed_right_v,
+    )
 }
 
 /// Select active points based on observation count in active frames

@@ -30,6 +30,8 @@ pub struct VioConfig {
     pub gyro_sigma: f64,
     /// Accelerometer random walk noise (m/s^2/sqrt(Hz))
     pub accel_sigma: f64,
+    /// Visual observation standard deviation (pixels)
+    pub obs_std_dev: f64,
     /// Enable optimization graph visualization
     pub enable_graph_viz: bool,
 }
@@ -43,6 +45,7 @@ impl Default for VioConfig {
             max_active_points: 600,
             gyro_sigma: 0.001,
             accel_sigma: 0.01,
+            obs_std_dev: 0.5, // Standard observation noise for VIO (pixels)
             enable_graph_viz: false,
         }
     }
@@ -261,10 +264,10 @@ pub fn run_vio_bundle_adjustment(
     }
     for &id in &optimized_point_ids {
         let p_idx = point_to_param_idx[&id];
-        let pt = world.get_point(id).unwrap();
-        initial_params[p_idx + 0] = pt.x;
-        initial_params[p_idx + 1] = pt.y;
-        initial_params[p_idx + 2] = pt.z;
+        let pt_info = world.get_point_info(id).unwrap();
+        initial_params[p_idx + 0] = pt_info.direction.0; // direction_u
+        initial_params[p_idx + 1] = pt_info.direction.1; // direction_v
+        initial_params[p_idx + 2] = pt_info.inv_depth;   // inverse depth
     }
 
     // ========== 5. Solve ==========
@@ -338,14 +341,12 @@ pub fn run_vio_bundle_adjustment(
     }
     for &id in &optimized_point_ids {
         let p_idx = point_to_param_idx[&id];
-        world.update_point(
-            id,
-            Vec3::new(
-                optimized[p_idx + 0],
-                optimized[p_idx + 1],
-                optimized[p_idx + 2],
-            ),
+        let direction = (
+            optimized[p_idx + 0],  // direction_u
+            optimized[p_idx + 1],  // direction_v
         );
+        let inv_depth = optimized[p_idx + 2];
+        world.update_point_params(id, direction, inv_depth);
     }
 
     // Extract graph info for visualization if enabled
@@ -442,16 +443,20 @@ fn compute_vio_cost(
             ]
         };
 
+        // Get point info for host pose and parameters
+        let pt_info = world.get_point_info(obs.point_id).unwrap();
+        
         let pt_params: [JetV; 3] = if opt_point {
             let base = point_to_param_idx[&obs.point_id];
             let offset = if opt_pose { 6 } else { 0 };
+            // Point params are [direction_u, direction_v, inv_depth]
             std::array::from_fn(|i| JetV::variable(params[base + i], offset + i))
         } else {
-            let pt = world.get_point(obs.point_id).unwrap();
+            // Fixed point - use current inverse depth parameters
             [
-                JetV::constant(pt.x),
-                JetV::constant(pt.y),
-                JetV::constant(pt.z),
+                JetV::constant(pt_info.direction.0),  // direction_u
+                JetV::constant(pt_info.direction.1),  // direction_v
+                JetV::constant(pt_info.inv_depth),    // inverse depth
             ]
         };
 
@@ -465,10 +470,12 @@ fn compute_vio_cost(
             JetV::constant(stereo_camera.baseline),
         );
 
-        let (r1, r2, r3, r4) = crate::optimization::stereo_reprojection_residual_host_relative(
+        // Use inverse depth residual
+        let (r1, r2, r3, r4) = crate::optimization::stereo_reprojection_residual_inverse_depth(
             rot_host,
             &pose_params,
             &pt_params,
+            &pt_info.host_pose,  // Fixed host pose from point
             &camera_jet,
             JetV::constant(obs.left_u),
             JetV::constant(obs.left_v),
@@ -520,11 +527,16 @@ fn compute_vio_cost(
             let n_active = (if opt_pose { 6 } else { 0 }) + (if opt_point { 3 } else { 0 });
             apply_huber_loss(config.huber_delta, &mut r_val, &mut deriv_slice[..n_active]);
 
-            // Apply uncertainty weight to both residual and Jacobian
-            // This ensures uncertain fixed points contribute less to the optimization
-            r_val *= uncertainty_weight;
+            // Apply observation noise weighting (information matrix = 1/variance)
+            // This ensures residuals are properly weighted relative to IMU residuals
+            let obs_weight = 1.0 / (config.obs_std_dev * config.obs_std_dev);
+            
+            // Combined weight: observation noise * point uncertainty
+            let combined_weight = obs_weight * uncertainty_weight;
+            
+            r_val *= combined_weight;
             for d in &mut deriv_slice[..n_active] {
-                *d *= uncertainty_weight;
+                *d *= combined_weight;
             }
 
             residuals[obs_idx * 4 + i] = r_val;

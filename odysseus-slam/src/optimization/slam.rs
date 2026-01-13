@@ -83,6 +83,8 @@ pub struct BundleAdjustmentConfig {
     pub max_active_points: usize,
     /// Huber loss threshold (pixels)
     pub huber_delta: f64,
+    /// Visual observation standard deviation (pixels)
+    pub obs_std_dev: f64,
     /// Enable optimization graph visualization
     pub enable_graph_viz: bool,
 }
@@ -94,6 +96,7 @@ impl Default for BundleAdjustmentConfig {
             tolerance: 1e-6,
             max_active_points: 600,
             huber_delta: 1.0,
+            obs_std_dev: 0.5, // Standard observation noise (pixels)
             enable_graph_viz: false,
         }
     }
@@ -107,6 +110,7 @@ impl BundleAdjustmentConfig {
             tolerance: 1e-6,
             max_active_points: 600,
             huber_delta: 1.0,
+            obs_std_dev: 0.5,
             enable_graph_viz: false,
         }
     }
@@ -118,6 +122,7 @@ impl BundleAdjustmentConfig {
             tolerance: 1e-8,
             max_active_points: 800,
             huber_delta: 1.0,
+            obs_std_dev: 0.5,
             enable_graph_viz: false,
         }
     }
@@ -365,6 +370,7 @@ pub fn run_bundle_adjustment(
                 world,
                 stereo_camera,
                 config.huber_delta,
+                config.obs_std_dev,
                 prior,
                 n_obs_residuals,
             );
@@ -389,6 +395,7 @@ pub fn run_bundle_adjustment(
             world,
             stereo_camera,
             config.huber_delta,
+            config.obs_std_dev,
             prior,
             n_obs_residuals,
         );
@@ -479,6 +486,7 @@ fn compute_ba_cost(
     world: &WorldState,
     stereo_camera: &StereoCamera<f64>,
     huber_delta: f64,
+    obs_std_dev: f64,
     prior: Option<&MarginalizedPrior>,
     n_obs_residuals: usize,
 ) {
@@ -542,8 +550,9 @@ fn compute_ba_cost(
                 Jet::constant(obs.right_v),
             );
 
-            // Write residuals and jacobian with Huber loss
+            // Write residuals and jacobian with Huber loss and observation weighting
             // Jacobian is written linearly - pose entries first, then point entries
+            let obs_weight = 1.0 / (obs_std_dev * obs_std_dev);
             let residual_jets = [r1, r2, r3, r4];
             for (i, r) in residual_jets.iter().enumerate() {
                 let mut r_val = r.value;
@@ -556,6 +565,11 @@ fn compute_ba_cost(
                             r.derivs[6], r.derivs[7], r.derivs[8],
                         ];
                         apply_huber_loss(huber_delta, &mut r_val, &mut combined);
+                        // Apply observation weighting
+                        r_val *= obs_weight;
+                        for d in &mut combined {
+                            *d *= obs_weight;
+                        }
                         // Write pose params (6), then point params (3)
                         jacobian_data[jac_cursor..jac_cursor + 9].copy_from_slice(&combined);
                         jac_cursor += 9;
@@ -565,12 +579,20 @@ fn compute_ba_cost(
                             r.derivs[0], r.derivs[1], r.derivs[2], r.derivs[3], r.derivs[4], r.derivs[5],
                         ];
                         apply_huber_loss(huber_delta, &mut r_val, &mut pose_jac);
+                        r_val *= obs_weight;
+                        for d in &mut pose_jac {
+                            *d *= obs_weight;
+                        }
                         jacobian_data[jac_cursor..jac_cursor + 6].copy_from_slice(&pose_jac);
                         jac_cursor += 6;
                     }
                     (false, true) => {
                         let mut point_jac = [r.derivs[0], r.derivs[1], r.derivs[2]];
                         apply_huber_loss(huber_delta, &mut r_val, &mut point_jac);
+                        r_val *= obs_weight;
+                        for d in &mut point_jac {
+                            *d *= obs_weight;
+                        }
                         jacobian_data[jac_cursor..jac_cursor + 3].copy_from_slice(&point_jac);
                         jac_cursor += 3;
                     }
@@ -578,6 +600,7 @@ fn compute_ba_cost(
                         // No jacobian entries, just apply Huber to residual
                         let mut dummy = [0.0_f64; 0];
                         apply_huber_loss(huber_delta, &mut r_val, &mut dummy);
+                        r_val *= obs_weight;
                     }
                 }
 
@@ -926,6 +949,7 @@ pub fn run_gba_with_imu_constraints(
                 world,
                 stereo_camera,
                 config.huber_delta,
+                config.obs_std_dev,
                 gravity,
                 n_obs_residuals,
             );
@@ -997,6 +1021,7 @@ pub fn run_gba_with_imu_constraints(
         world,
         stereo_camera,
         config.huber_delta,
+        config.obs_std_dev,
         gravity,
         n_obs_residuals,
     );
@@ -1023,6 +1048,7 @@ fn compute_gba_imu_cost(
     world: &WorldState,
     stereo_camera: &StereoCamera<f64>,
     huber_delta: f64,
+    obs_std_dev: f64,
     gravity: [f64; 3],
     n_obs_residuals: usize,
 ) {
@@ -1081,6 +1107,7 @@ fn compute_gba_imu_cost(
             );
 
             let errs = [err_lu, err_lv, err_ru, err_rv];
+            let obs_weight = 1.0 / (obs_std_dev * obs_std_dev);
 
             for (i, err) in errs.iter().enumerate() {
                 let mut r_val = err.value;
@@ -1089,6 +1116,11 @@ fn compute_gba_imu_cost(
                 if n_active_params > 0 {
                     let mut local_jac: Vec<f64> = err.derivs[..n_active_params].to_vec();
                     apply_huber_loss(huber_delta, &mut r_val, &mut local_jac);
+                    // Apply observation weighting
+                    r_val *= obs_weight;
+                    for j in &mut local_jac {
+                        *j *= obs_weight;
+                    }
                     for j in local_jac {
                         jacobian_data[jac_cursor] = j;
                         jac_cursor += 1;
@@ -1096,6 +1128,7 @@ fn compute_gba_imu_cost(
                 } else {
                     let mut dummy = [0.0_f64; 0];
                     apply_huber_loss(huber_delta, &mut r_val, &mut dummy);
+                    r_val *= obs_weight;
                 }
 
                 residuals[res_offset + i] = r_val;
@@ -1229,6 +1262,7 @@ fn extract_point_priors(
     world: &WorldState,
     stereo_camera: &StereoCamera<f64>,
     huber_delta: f64,
+    obs_std_dev: f64,
     gravity: [f64; 3],
     n_obs_residuals: usize,
 ) -> PointPriors {
@@ -1247,6 +1281,7 @@ fn extract_point_priors(
         world,
         stereo_camera,
         huber_delta,
+        obs_std_dev,
         gravity,
         n_obs_residuals,
     );
@@ -1285,9 +1320,8 @@ fn extract_point_priors(
         // Scale down the information matrix to loosen the constraint
         // Similar to COVARIANCE_SCALE_FACTOR for RelativePoseConstraints,
         // we need to allow VIO/LBA room to move points if visual evidence
-        // contradicts GBA's estimates. Dividing information by 100 means
-        // we trust the prior 10x less (equivalent to scaling covariance by 100).
-        const INFORMATION_SCALE_FACTOR: f64 = 0.01; // = 1/100
+        // contradicts GBA's estimates.
+        const INFORMATION_SCALE_FACTOR: f64 = 0.5;
         information *= INFORMATION_SCALE_FACTOR;
 
         // Add small regularization to ensure invertibility
