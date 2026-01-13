@@ -87,7 +87,7 @@ macro_rules! impl_levenberg_marquardt {
                     initial_lambda: $initial_lambda,
                     lambda_scale_up: 10.0,
                     lambda_scale_down: 0.1,
-                    verbose: true,
+                    verbose: false,
 
                     // Pre-allocate all working memory on heap
                     // SAFETY: We use new_zeroed() to allocate directly on heap,

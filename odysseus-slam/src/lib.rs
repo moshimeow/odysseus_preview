@@ -16,6 +16,7 @@ pub mod slam_system_dynamic;
 pub mod spline;
 pub mod trajectory;
 pub mod utils;
+pub mod vio_slam_system;
 pub mod visualization;
 pub mod world_state;
 // Re-export key types
@@ -26,5 +27,6 @@ pub use math::{SE3, SO3};
 pub use odysseus_solver::{Jet, Real};
 pub use optimization::{run_bundle_adjustment, BundleAdjustmentConfig, BundleAdjustmentResult};
 pub use slam_system::{GbaToLbaMsg, LbaToGbaMsg, SlamSystem};
+pub use vio_slam_system::VioSlamSystem;
 pub use slam_system_dynamic::SlamSystemDynamic;
 pub use world_state::{PointInfo, WorldState};

@@ -18,7 +18,8 @@ pub mod vio;
 
 // Re-export BA types for backward compatibility
 pub use slam::{
-    run_bundle_adjustment, BundleAdjustmentConfig, BundleAdjustmentResult, MarginalizedPrior,
+    run_bundle_adjustment, run_gba_with_imu_constraints, BundleAdjustmentConfig,
+    BundleAdjustmentResult, GbaWithImuResult, MarginalizedPrior, PointPrior, PointPriors,
 };
 
 // Re-export shared problem types

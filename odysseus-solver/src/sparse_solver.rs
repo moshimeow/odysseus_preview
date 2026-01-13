@@ -89,7 +89,7 @@ where
             initial_lambda: T::from(1e-4).unwrap(),
             lambda_scale_up: T::from(10.0).unwrap(),
             lambda_scale_down: T::from(0.1).unwrap(),
-            verbose: true,
+            verbose: false,
             jacobian,
             jtr,
             residuals,
