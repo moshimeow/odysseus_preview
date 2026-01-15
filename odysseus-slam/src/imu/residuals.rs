@@ -5,7 +5,7 @@
 //!
 //! These residual functions support autodiff via the Real trait.
 
-use super::preintegration::{PreintegratedImu, RelativePoseConstraint};
+use super::preintegration::PreintegratedImu;
 use nalgebra::Vector3;
 use odysseus_solver::math3d::{Quat, Vec3};
 use odysseus_solver::Real;
@@ -127,134 +127,6 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
         pos_in_i.x - T::from_literal(delta_p_corrected.x),
         pos_in_i.y - T::from_literal(delta_p_corrected.y),
         pos_in_i.z - T::from_literal(delta_p_corrected.z),
-    );
-
-    [
-        rot_residual.x,
-        rot_residual.y,
-        rot_residual.z,
-        vel_residual.x,
-        vel_residual.y,
-        vel_residual.z,
-        pos_residual.x,
-        pos_residual.y,
-        pos_residual.z,
-    ]
-}
-
-/// Relative pose constraint residual (9 DOF)
-///
-/// Computes the residual for a visually-informed relative pose constraint.
-/// The constraint contains posterior deltas (already incorporating visual information
-/// from VIO optimization) and a posterior covariance that's tighter than IMU-only.
-///
-/// Unlike `imu_preintegration_residual`, this does NOT do bias correction since the
-/// deltas are already optimized posteriors from VIO.
-///
-/// # Parameters
-/// - `rotation_host_i/j`: Base quaternion for frame i/j (f64 host)
-/// - `pose_params_i/j`: [rot_delta(3), translation(3), velocity(3), ...]
-///   Only first 9 elements used (biases not needed)
-/// - `constraint`: The relative pose constraint with posterior deltas and covariance
-/// - `gravity`: Gravity in world frame
-///
-/// # Returns
-/// 9 unweighted residuals: [rotation(3), velocity(3), position(3)]
-/// Caller should apply sqrt_information weighting if desired
-pub fn relative_pose_constraint_residual<T: Real<Scalar = f64>>(
-    // Frame i parameters
-    rotation_host_i: &Quat<f64>,
-    pose_params_i: &[T], // [rot_delta, trans, vel, ...] - at least 9 elements
-
-    // Frame j parameters
-    rotation_host_j: &Quat<f64>,
-    pose_params_j: &[T], // [rot_delta, trans, vel, ...] - at least 9 elements
-
-    // Constraint with posterior deltas
-    constraint: &RelativePoseConstraint,
-
-    // Gravity in world frame
-    gravity: &[T; 3],
-) -> [T; 9] {
-    // Extract parameters for frame i
-    let rot_delta_i = Vec3::new(pose_params_i[0], pose_params_i[1], pose_params_i[2]);
-    let trans_i = Vec3::new(pose_params_i[3], pose_params_i[4], pose_params_i[5]);
-    let vel_i = Vec3::new(pose_params_i[6], pose_params_i[7], pose_params_i[8]);
-
-    // Extract parameters for frame j
-    let rot_delta_j = Vec3::new(pose_params_j[0], pose_params_j[1], pose_params_j[2]);
-    let trans_j = Vec3::new(pose_params_j[3], pose_params_j[4], pose_params_j[5]);
-    let vel_j = Vec3::new(pose_params_j[6], pose_params_j[7], pose_params_j[8]);
-
-    // Build rotations: R = R_host * exp(delta)
-    let q_delta_i = Quat::from_axis_angle(rot_delta_i);
-    let q_host_i = Quat::new(
-        T::from_literal(rotation_host_i.w),
-        T::from_literal(rotation_host_i.x),
-        T::from_literal(rotation_host_i.y),
-        T::from_literal(rotation_host_i.z),
-    );
-    let r_i = q_host_i * q_delta_i;
-
-    let q_delta_j = Quat::from_axis_angle(rot_delta_j);
-    let q_host_j = Quat::new(
-        T::from_literal(rotation_host_j.w),
-        T::from_literal(rotation_host_j.x),
-        T::from_literal(rotation_host_j.y),
-        T::from_literal(rotation_host_j.z),
-    );
-    let r_j = q_host_j * q_delta_j;
-
-    // Time interval and gravity
-    let dt = T::from_literal(constraint.delta_time);
-    let dt_sq = dt * dt;
-    let g = Vec3::new(gravity[0], gravity[1], gravity[2]);
-
-    // Convert constraint's delta rotation to Quat<T>
-    let delta_r_expected = Quat::new(
-        T::from_literal(constraint.delta_rotation.w),
-        T::from_literal(constraint.delta_rotation.x),
-        T::from_literal(constraint.delta_rotation.y),
-        T::from_literal(constraint.delta_rotation.z),
-    );
-
-    // === Rotation Residual ===
-    // r_R = Log(ΔR_expected^T * R_i^T * R_j)
-    let r_i_inv = r_i.conjugate();
-    let r_ij = r_i_inv * r_j; // R_i^T * R_j (predicted relative rotation)
-    let delta_r_inv = delta_r_expected.conjugate();
-    let r_error = delta_r_inv * r_ij; // ΔR^T * R_i^T * R_j
-    let rot_residual = r_error.to_axis_angle();
-
-    // === Velocity Residual ===
-    // Predicted: R_i^T * (v_j - v_i - g*Δt)
-    // Expected: constraint.delta_velocity
-    let half = T::from_literal(0.5);
-    let vel_diff = Vec3::new(
-        vel_j.x - vel_i.x - g.x * dt,
-        vel_j.y - vel_i.y - g.y * dt,
-        vel_j.z - vel_i.z - g.z * dt,
-    );
-    let vel_in_i = r_i_inv.rotate_vec(vel_diff);
-    let vel_residual = Vec3::new(
-        vel_in_i.x - T::from_literal(constraint.delta_velocity.x),
-        vel_in_i.y - T::from_literal(constraint.delta_velocity.y),
-        vel_in_i.z - T::from_literal(constraint.delta_velocity.z),
-    );
-
-    // === Position Residual ===
-    // Predicted: R_i^T * (p_j - p_i - v_i*Δt - 0.5*g*Δt²)
-    // Expected: constraint.delta_position
-    let pos_diff = Vec3::new(
-        trans_j.x - trans_i.x - vel_i.x * dt - half * g.x * dt_sq,
-        trans_j.y - trans_i.y - vel_i.y * dt - half * g.y * dt_sq,
-        trans_j.z - trans_i.z - vel_i.z * dt - half * g.z * dt_sq,
-    );
-    let pos_in_i = r_i_inv.rotate_vec(pos_diff);
-    let pos_residual = Vec3::new(
-        pos_in_i.x - T::from_literal(constraint.delta_position.x),
-        pos_in_i.y - T::from_literal(constraint.delta_position.y),
-        pos_in_i.z - T::from_literal(constraint.delta_position.z),
     );
 
     [

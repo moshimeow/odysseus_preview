@@ -16,7 +16,7 @@ pub mod residuals;
 pub mod optimization;
 
 pub use types::{ImuMeasurement, ImuFrameState};
-pub use preintegration::{PreintegratedImu, RelativePoseConstraint, VisuallyInformedPreintegration};
+pub use preintegration::PreintegratedImu;
 pub use simulator::ImuSimulator;
-pub use residuals::{imu_preintegration_residual, bias_residual, relative_pose_constraint_residual};
+pub use residuals::{imu_preintegration_residual, bias_residual};
 pub use optimization::{run_imu_optimization, ImuOptimizationResult};
