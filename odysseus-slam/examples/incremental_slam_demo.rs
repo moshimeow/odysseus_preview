@@ -179,7 +179,7 @@ fn run_slam(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     slam_system.send_to_gba(0, &world);
 
     // Visualize ground truth (static, shown in all timelines)
-    let _ = visualize_ground_truth(&rec, &gt_points, &gt_poses, &stereo_camera)?;
+    let _ = visualize_ground_truth(&rec, Some(&gt_points), &gt_poses, &stereo_camera)?;
 
     // Visualize initial state on trajectory timeline
     visualize_estimate(

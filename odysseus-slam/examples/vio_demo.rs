@@ -195,7 +195,7 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Visualize ground truth
-    visualize_ground_truth(&rec, &gt_points, &gt_poses, &stereo_camera)?;
+    visualize_ground_truth(&rec, Some(&gt_points), &gt_poses, &stereo_camera)?;
 
     // Initialize SLAM state
     println!("🏗️  Initializing VIO state...");

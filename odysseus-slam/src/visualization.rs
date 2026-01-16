@@ -133,7 +133,7 @@ pub fn visualize_stereo_camera(
 /// Visualize ground truth trajectory and map
 pub fn visualize_ground_truth(
     rec: &rr::RecordingStream,
-    points: &[Point3D<f64>],
+    points: Option<&[Point3D<f64>]>,
     poses: &[SE3<f64>],
     stereo_camera: &StereoCamera<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -141,28 +141,30 @@ pub fn visualize_ground_truth(
     rec.set_time_sequence("trajectory", 0);
 
     // Ground truth points (gray)
-    if !points.is_empty() {
-        let point_positions: Vec<[f32; 3]> = points
-            .iter()
-            .filter_map(|p| {
-                let x = p.x as f32;
-                let y = p.y as f32;
-                let z = p.z as f32;
-                if x.is_finite() && y.is_finite() && z.is_finite() {
-                    Some([x, y, z])
-                } else {
-                    None
-                }
-            })
-            .collect();
+    if let Some(points) = points {
+        if !points.is_empty() {
+            let point_positions: Vec<[f32; 3]> = points
+                .iter()
+                .filter_map(|p| {
+                    let x = p.x as f32;
+                    let y = p.y as f32;
+                    let z = p.z as f32;
+                    if x.is_finite() && y.is_finite() && z.is_finite() {
+                        Some([x, y, z])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-        if !point_positions.is_empty() {
-            rec.log(
-                "world/ground_truth/points",
-                &rr::Points3D::new(point_positions)
-                    .with_colors([[120, 120, 120]])
-                    .with_radii([0.03]),
-            )?;
+            if !point_positions.is_empty() {
+                rec.log(
+                    "world/ground_truth/points",
+                    &rr::Points3D::new(point_positions)
+                        .with_colors([[120, 120, 120]])
+                        .with_radii([0.03]),
+                )?;
+            }
         }
     }
 
@@ -191,6 +193,60 @@ pub fn visualize_ground_truth(
             stereo_camera,
             [100, 100, 100, 255], // Gray for GT
         )?;
+    }
+
+    Ok(())
+}
+
+/// Visualize estimated trajectory and map with ground truth points
+///
+/// This is a wrapper around `visualize_estimate` that also renders ground truth points.
+/// Used in tracker mode where GT points are accumulated incrementally.
+/// Synthetic mode should use `visualize_estimate` directly (GT rendered once by `visualize_ground_truth`).
+pub fn visualize_estimate_with_gt_points(
+    rec: &rr::RecordingStream,
+    frame_idx: usize,
+    world: &WorldState,
+    frame_graph: &FrameGraph,
+    gt_points: &[Point3D<f64>],
+    stereo_camera: &StereoCamera<f64>,
+    prev_frame_graph: Option<&FrameGraph>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // First render the estimate (includes error lines)
+    visualize_estimate(
+        rec,
+        frame_idx,
+        world,
+        frame_graph,
+        gt_points,
+        stereo_camera,
+        prev_frame_graph,
+    )?;
+
+    // Then render GT points (gray, same style as visualize_ground_truth)
+    if !gt_points.is_empty() {
+        let point_positions: Vec<[f32; 3]> = gt_points
+            .iter()
+            .filter_map(|p| {
+                let x = p.x as f32;
+                let y = p.y as f32;
+                let z = p.z as f32;
+                if x.is_finite() && y.is_finite() && z.is_finite() {
+                    Some([x, y, z])
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !point_positions.is_empty() {
+            rec.log(
+                "world/ground_truth/points",
+                &rr::Points3D::new(point_positions)
+                    .with_colors([[120, 120, 120]])
+                    .with_radii([0.03]),
+            )?;
+        }
     }
 
     Ok(())

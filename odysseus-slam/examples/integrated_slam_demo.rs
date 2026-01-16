@@ -27,7 +27,7 @@ use odysseus_slam::{
     optimization::{run_bundle_adjustment, visualize_optimization_graph, BundleAdjustmentConfig, MarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     utils::{get_peak_rss_mb, get_rss_mb, load_camera_poses, load_point_cloud_vec3},
-    visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
+    visualization::{visualize_estimate, visualize_estimate_with_gt_points, visualize_gba_update, visualize_ground_truth},
     SlamSystemDynamic, WorldState,
 };
 use odysseus_slam_frontend::{TrackedFeature, Tracker, TrackerConfig};
@@ -698,7 +698,7 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Generate observations and ground truth points based on mode
-    let (mut frame_observations_arc, gt_points_vec): (Arc<Vec<Vec<StereoObservation>>>, Vec<Vec3<f64>>);
+    let (mut frame_observations_arc, mut gt_points_vec): (Arc<Vec<Vec<StereoObservation>>>, Vec<Vec3<f64>>);
     let depth_maps_for_viz: Vec<Option<Vec<Vec<f32>>>>;
 
     if use_synthetic_observations {
@@ -751,89 +751,8 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
         let depth_maps = load_all_depth_maps(&image_dir, &frame_numbers);
 
-        // Pre-run tracker to determine which features will be tracked
-        println!("🔍 Pre-running tracker to determine tracked features...");
-        let config = TrackerConfig {
-            min_features: 150,
-            max_features: 400,
-            ..Default::default()
-        };
-        
-        // Create frontend camera model for pre-tracker
-        use odysseus_slam_frontend::{PinholeCamera, StereoCamera as FrontendStereoCamera};
-        let frontend_camera = FrontendStereoCamera {
-            left: PinholeCamera {
-                fx: stereo_camera.left.fx as f32,
-                fy: stereo_camera.left.fy as f32,
-                cx: stereo_camera.left.cx as f32,
-                cy: stereo_camera.left.cy as f32,
-            },
-            baseline: stereo_camera.baseline as f32,
-        };
-        
-        let mut pre_tracker = Tracker::with_config(config.clone()).with_camera(frontend_camera);
-
-        // Track through all frames to build GT point map
-        let mut gt_points_map: HashMap<usize, Vec3<f64>> = HashMap::new();
-        for (i, &frame_num) in frame_numbers.iter().enumerate() {
-            let left_path = image_dir.join(format!("Image{:04}_L.jpg", frame_num));
-            let right_path = image_dir.join(format!("Image{:04}_R.jpg", frame_num));
-
-            let left_img = image::open(&left_path)?.to_luma8();
-            let right_img = image::open(&right_path)?.to_luma8();
-
-            let tracks = pre_tracker.process_frame(&left_img, &right_img);
-            let frame_obs = features_to_observations(&tracks, i);
-
-            // Build GT points for tracked features using cached depth map
-            if let Some(ref depth_map) = depth_maps[i] {
-                let pose = gt_poses.as_ref()
-                    .and_then(|p| p.get(i))
-                    .cloned()
-                    .unwrap_or_else(SE3::identity);
-
-                for obs in &frame_obs {
-                    if !gt_points_map.contains_key(&obs.point_id) {
-                        let x = obs.left_u as usize;
-                        let y = obs.left_v as usize;
-                        if y < depth_map.len() && x < depth_map[0].len() {
-                            let depth = depth_map[y][x];
-                            if depth > 0.0 && depth.is_finite() {
-                                let gt_point = pixel_to_world_point(
-                                    obs.left_u,
-                                    obs.left_v,
-                                    depth,
-                                    &pose,
-                                    &stereo_camera,
-                                );
-                                gt_points_map.insert(obs.point_id, gt_point);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Print progress every 5 frames
-            if (i + 1) % 5 == 0 || i + 1 == frame_numbers.len() {
-                println!(
-                    "  Progress: {}/{} frames, {} GT points so far",
-                    i + 1,
-                    frame_numbers.len(),
-                    gt_points_map.len()
-                );
-            }
-        }
-        println!("  Completed! Built {} ground truth points for tracked features\n", gt_points_map.len());
-
-        // Convert to vector for visualization
-        let mut points_vec: Vec<Vec3<f64>> = vec![Vec3::new(0.0, 0.0, 0.0); gt_points_map.len()];
-        for (&point_id, &point) in &gt_points_map {
-            if point_id < points_vec.len() {
-                points_vec[point_id] = point;
-            }
-        }
-
-        gt_points_vec = points_vec;
+        // Start with empty GT points, will populate during tracking
+        gt_points_vec = Vec::new();
 
         // In tracker mode, observations will be generated frame-by-frame
         // Create a placeholder that will be populated in the main loop
@@ -957,19 +876,35 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Visualize ground truth trajectory and tracked feature points
     if let Some(ref poses) = gt_poses {
-        visualize_ground_truth(&rec, &gt_points_vec, poses, &stereo_camera)?;
+        if use_synthetic_observations {
+            visualize_ground_truth(&rec, Some(&gt_points_vec), poses, &stereo_camera)?;
+        } else {
+            visualize_ground_truth(&rec, None, poses, &stereo_camera)?;
+        }
     }
 
     // Visualize initial state
-    visualize_estimate(
-        &rec,
-        0,
-        &world,
-        &frame_graph,
-        &gt_points_vec,
-        &stereo_camera,
-        None,
-    )?;
+    if use_synthetic_observations {
+        visualize_estimate(
+            &rec,
+            0,
+            &world,
+            &frame_graph,
+            &gt_points_vec,
+            &stereo_camera,
+            None,
+        )?;
+    } else {
+        visualize_estimate_with_gt_points(
+            &rec,
+            0,
+            &world,
+            &frame_graph,
+            &gt_points_vec,
+            &stereo_camera,
+            None,
+        )?;
+    }
 
     slam_system.send_to_gba(0, &world, frame_observations_arc.clone());
 
@@ -1224,6 +1159,32 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             for obs in &current_frame_obs {
                 if world.get_point(obs.point_id).is_none() {
                     world.triangulate_and_add_point(obs, &stereo_camera, frame_idx);
+                    
+                    // Compute GT point in tracker mode
+                    if !use_synthetic_observations {
+                        if let Some(ref depth_map) = depth_maps_for_viz.get(frame_idx).and_then(|d| d.as_ref()) {
+                            let px = obs.left_u.round() as usize;
+                            let py = obs.left_v.round() as usize;
+                            if py < depth_map.len() && px < depth_map[0].len() {
+                                let depth = depth_map[py][px];
+                                if depth > 0.0 && depth < 100.0 {
+                                    let gt_point = pixel_to_world_point(
+                                        obs.left_u,
+                                        obs.left_v,
+                                        depth,
+                                        &world.frames[frame_idx].world_pose(),
+                                        &stereo_camera,
+                                    );
+                                    
+                                    // Grow gt_points_vec if needed (use NAN as sentinel for uninitialized)
+                                    if obs.point_id >= gt_points_vec.len() {
+                                        gt_points_vec.resize(obs.point_id + 1, Vec3::new(f64::NAN, f64::NAN, f64::NAN));
+                                    }
+                                    gt_points_vec[obs.point_id] = gt_point;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1331,15 +1292,27 @@ fn run_slam(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Visualize
-        visualize_estimate(
-            &rec,
-            frame_idx,
-            &world,
-            &frame_graph,
-            &gt_points_vec,
-            &stereo_camera,
-            prev_frame_graph.as_ref(),
-        )?;
+        if use_synthetic_observations {
+            visualize_estimate(
+                &rec,
+                frame_idx,
+                &world,
+                &frame_graph,
+                &gt_points_vec,
+                &stereo_camera,
+                prev_frame_graph.as_ref(),
+            )?;
+        } else {
+            visualize_estimate_with_gt_points(
+                &rec,
+                frame_idx,
+                &world,
+                &frame_graph,
+                &gt_points_vec,
+                &stereo_camera,
+                prev_frame_graph.as_ref(),
+            )?;
+        }
         prev_frame_graph = Some(frame_graph.clone());
 
         // 2D tracking visualization (tracker mode only)
