@@ -15,12 +15,16 @@ pub mod graph_visualization;
 pub mod marginalization;
 pub mod slam;
 pub mod vio;
+pub mod vio_slam;
 
 // Re-export BA types for backward compatibility
 pub use slam::{
     run_bundle_adjustment, BundleAdjustmentConfig,
     BundleAdjustmentResult, MarginalizedPrior, PointPrior, PointPriors,
 };
+
+// Re-export simple VIO types
+pub use vio::{run_simple_vio_bundle_adjustment, VioConfig, VioResult};
 
 // Re-export shared problem types
 pub use marginalization::{compute_marginalization, SlamMarginalization, VioMarginalizedPrior};

@@ -18,16 +18,13 @@ use odysseus_slam::{
     geometry::{Point3D, StereoObservation},
     imu::{simulator::ImuNoiseParams, ImuFrameState, ImuSimulator, PreintegratedImu},
     math::SE3,
-    optimization::vio_slam::{run_vio_bundle_adjustment, VioConfig},
-    optimization::{PointPriors, VioMarginalizedPrior},
+    optimization::{run_simple_vio_bundle_adjustment, VioConfig, VioMarginalizedPrior},
     simulation::{add_noise_to_stereo_observations, generate_stereo_observations},
     spline::BezierSplineTrajectory,
     trajectory::ContinuousTrajectory,
     utils::{get_peak_rss_mb, get_rss_mb, load_point_cloud},
-    visualization::{visualize_estimate, visualize_gba_update, visualize_ground_truth},
-    VioSlamSystem, WorldState,
+    visualization::{visualize_estimate, visualize_ground_truth},WorldState,
 };
-use odysseus_solver::math3d::Vec3;
 use rerun as rr;
 use std::sync::Arc;
 
@@ -221,24 +218,10 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         "  Initialized {} points from triangulation\n",
         world.num_points()
     );
-
-    // Initialize GBA system
-    let mut slam_system = VioSlamSystem::new(stereo_camera.clone(), frame_observations.clone());
-    slam_system.send_to_gba(0, &world, None, None); // First frame has no constraint
-    println!("🔧 SLAM System initialized (GBA thread spawned)\n");
-
-    // GBA tracking variables
-    let mut gba_last_optimized_frame: Option<usize> = None;
-    let mut gba_update_count = 0;
-    let mut prev_gba_frame_graph: Option<FrameGraph> = None;
-    let mut last_keyframe_position: Vec3<f64> = Vec3::new(0.0, 0.0, 0.0);
-    let mut gba_point_priors: PointPriors = PointPriors::new();
     
-    // Inter-keyframe prior tracking
-    // These connect consecutive keyframes and are used as constraints in LBA
-    let mut inter_keyframe_priors: Vec<VioMarginalizedPrior> = Vec::new();
+    // Simple marginalization prior (accumulates as frames are marginalized)
+    let mut accumulated_prior: Option<VioMarginalizedPrior> = None;
     let mut last_keyframe_idx: usize = 0; // Track the most recent keyframe index
-    let mut pending_prior: Option<VioMarginalizedPrior> = None; // Accumulating prior for current keyframe
 
     // Metrics tracking for LBA/GBA interaction analysis
     let mut cumulative_position_error = 0.0;
@@ -289,208 +272,6 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Check for GBA results (non-blocking) and merge into world state
-        if let Some(gba_result) = slam_system.try_recv_from_gba() {
-            let gba_world = &gba_result.world_state;
-            let n_gba_frames = gba_world.frames.len();
-            gba_update_count += 1;
-
-            // Compute error BEFORE GBA merge for the most recent frame in GBA result
-            let last_gba_frame = gba_result.last_optimized_frame;
-            let pre_gba_error = if last_gba_frame < world.frames.len() && last_gba_frame < gt_poses.len() {
-                let pre_pose = world.frames[last_gba_frame].world_pose();
-                (pre_pose.translation - gt_poses[last_gba_frame].translation).norm()
-            } else {
-                0.0
-            };
-
-            // Compute error AFTER GBA for comparison
-            let post_gba_error = if last_gba_frame < gba_world.frames.len() && last_gba_frame < gt_poses.len() {
-                let post_pose = gba_world.frames[last_gba_frame].world_pose();
-                (post_pose.translation - gt_poses[last_gba_frame].translation).norm()
-            } else {
-                0.0
-            };
-
-            // Compute GBA update impact: how much did poses change?
-            let mut total_pose_change = 0.0;
-            let mut max_pose_change = 0.0f64;
-            let mut total_rotation_change = 0.0;
-            let mut max_rotation_change = 0.0f64;
-            let mut n_changed_frames = 0;
-
-            for i in 0..gba_world.frames.len().min(world.frames.len()) {
-                let pre_pose = world.frames[i].world_pose();
-                let post_pose = gba_world.frames[i].world_pose();
-
-                let pos_change = (post_pose.translation - pre_pose.translation).norm();
-                let q_change = pre_pose.rotation.inverse().quat * post_pose.rotation.quat;
-                // Clamp to handle floating point errors (w can slightly exceed 1.0)
-                let rot_change_deg = (2.0 * q_change.w.abs().clamp(0.0, 1.0).acos()).to_degrees();
-
-                total_pose_change += pos_change;
-                max_pose_change = max_pose_change.max(pos_change);
-                total_rotation_change += rot_change_deg;
-                max_rotation_change = max_rotation_change.max(rot_change_deg);
-                n_changed_frames += 1;
-            }
-
-            let avg_pose_change = if n_changed_frames > 0 {
-                total_pose_change / n_changed_frames as f64
-            } else {
-                0.0
-            };
-            let avg_rotation_change = if n_changed_frames > 0 {
-                total_rotation_change / n_changed_frames as f64
-            } else {
-                0.0
-            };
-
-            // Log GBA impact metrics to Rerun
-            rec.set_time_sequence("frame", frame_idx as i64);
-            let _ = rec.log(
-                "metrics/gba_impact/avg_position_change_m",
-                &rr::Scalars::new([avg_pose_change]),
-            );
-            let _ = rec.log(
-                "metrics/gba_impact/max_position_change_m",
-                &rr::Scalars::new([max_pose_change]),
-            );
-            let _ = rec.log(
-                "metrics/gba_impact/avg_rotation_change_deg",
-                &rr::Scalars::new([avg_rotation_change]),
-            );
-            let _ = rec.log(
-                "metrics/gba_impact/max_rotation_change_deg",
-                &rr::Scalars::new([max_rotation_change]),
-            );
-
-            // Compare GBA point positions to VIO point positions
-            let mut point_diffs: Vec<f64> = Vec::new();
-            for (point_id, prior) in &gba_result.point_priors.priors {
-                if let Some(vio_pos) = world.get_point(*point_id) {
-                    let gba_pos = Vec3::new(prior.position[0], prior.position[1], prior.position[2]);
-                    let diff = (vio_pos - gba_pos).norm();
-                    point_diffs.push(diff);
-                }
-            }
-            if !point_diffs.is_empty() {
-                point_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let max_diff = point_diffs.last().copied().unwrap_or(0.0);
-                let avg_diff = point_diffs.iter().sum::<f64>() / point_diffs.len() as f64;
-                let median_diff = point_diffs[point_diffs.len() / 2];
-                println!(
-                    "      Point drift (GBA vs VIO): avg={:.4}m, median={:.4}m, max={:.4}m ({} pts)",
-                    avg_diff, median_diff, max_diff, point_diffs.len()
-                );
-            }
-
-            // Log point prior statistics
-            if !gba_result.point_priors.priors.is_empty() {
-                let mut info_traces: Vec<f64> = gba_result
-                    .point_priors
-                    .priors
-                    .values()
-                    .map(|p| {
-                        p.information[(0, 0)] + p.information[(1, 1)] + p.information[(2, 2)]
-                    })
-                    .collect();
-                info_traces.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-                let min_info = info_traces.first().copied().unwrap_or(0.0);
-                let max_info = info_traces.last().copied().unwrap_or(0.0);
-                let median_info = info_traces[info_traces.len() / 2];
-                let mean_info: f64 =
-                    info_traces.iter().sum::<f64>() / info_traces.len() as f64;
-
-                let _ = rec.log(
-                    "metrics/point_priors/min_info_trace",
-                    &rr::Scalars::new([min_info]),
-                );
-                let _ = rec.log(
-                    "metrics/point_priors/max_info_trace",
-                    &rr::Scalars::new([max_info]),
-                );
-                let _ = rec.log(
-                    "metrics/point_priors/median_info_trace",
-                    &rr::Scalars::new([median_info]),
-                );
-                let _ = rec.log(
-                    "metrics/point_priors/mean_info_trace",
-                    &rr::Scalars::new([mean_info]),
-                );
-                let _ = rec.log(
-                    "metrics/point_priors/count",
-                    &rr::Scalars::new([info_traces.len() as f64]),
-                );
-            }
-
-            // Visualize GBA result before merging
-            let _ = visualize_gba_update(
-                &rec,
-                gba_update_count,
-                gba_world,
-                &gba_result.frame_graph,
-                &gt_points,
-                &stereo_camera,
-                prev_gba_frame_graph.as_ref(),
-            );
-            prev_gba_frame_graph = Some(gba_result.frame_graph.clone());
-
-            // Merge GBA-optimized state into world
-            world.replace_frames_from(gba_world);
-            gba_last_optimized_frame = Some(gba_result.last_optimized_frame);
-            
-            // Update IMU states with GBA's optimized velocities and biases
-            // This is critical for maintaining consistency between poses and IMU residuals!
-            // Without this, the IMU preintegration residuals will use stale velocities
-            // with new poses, causing irreconcilable errors.
-            for (i, gba_imu_state) in gba_result.imu_states.iter().enumerate() {
-                if i < imu_states.len() {
-                    if let Some(gba_state) = gba_imu_state {
-                        imu_states[i] = gba_state.clone();
-                    }
-                }
-            }
-            
-            // Store point priors for VIO to use as soft constraints
-            gba_point_priors = gba_result.point_priors.clone();
-            println!(
-                "  📥 Received GBA update #{} (frame {}, {} poses, {} points, {} point priors)",
-                gba_update_count,
-                gba_result.last_optimized_frame,
-                n_gba_frames,
-                gba_world.num_points(),
-                gba_point_priors.len()
-            );
-            println!(
-                "      GBA impact: avg pos {:.4}m (max {:.4}m), avg rot {:.2}° (max {:.2}°)",
-                avg_pose_change, max_pose_change, avg_rotation_change, max_rotation_change
-            );
-            // Show error improvement from GBA
-            let error_change = post_gba_error - pre_gba_error;
-            let direction = if error_change < -0.001 { "↓" } else if error_change > 0.001 { "↑" } else { "=" };
-            println!(
-                "      Error at frame {}: {:.4}m → {:.4}m ({}{:.4}m)",
-                last_gba_frame, pre_gba_error, post_gba_error, direction, error_change.abs()
-            );
-        }
-
-        // Mark GBA-optimized frames appropriately and clean up inter-keyframe priors
-        if let Some(gba_frame) = gba_last_optimized_frame {
-            if let Some(frame_state) = frame_graph.get(gba_frame) {
-                if frame_state.role != FrameRole::Keyframe {
-                    frame_graph.set_role(gba_frame, FrameRole::Stored);
-                }
-            }
-            
-            // Drop inter-keyframe priors where both endpoints are now fixed by GBA
-            inter_keyframe_priors.retain(|prior| {
-                // Keep if at least one pose is still optimized (not fixed by GBA)
-                prior.pose_ids.iter().any(|&pose_id| pose_id > gba_frame)
-            });
-        }
-
         // Get initial guess from previous pose (with simulated tracking error)
         let mut init_pose = world.get_pose(frame_idx - 1).unwrap();
         let mut init_vel = imu_states[frame_idx - 1].velocity;
@@ -519,7 +300,8 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
 
         // Compute baseline (translation) since last keyframe
         let current_position = init_pose.translation;
-        let translation_since_keyframe = (current_position - last_keyframe_position).norm();
+        let last_kf_position = world.frames[last_keyframe_idx].world_pose().translation;
+        let translation_since_keyframe = (current_position - last_kf_position).norm();
 
         // Adaptive baseline threshold based on median depth of visible points
         let sufficient_baseline =
@@ -569,46 +351,29 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
                     _new_points += 1;
                 }
             }
-            last_keyframe_position = current_position;
-        }
-
-        // Manage window: marginalize old intermediate frames between keyframes
-        // Keep ALL keyframes until GBA processes them
-        let gba_last_frame = gba_last_optimized_frame.unwrap_or(0);
-        
-        // Mark frames as Fixed if GBA has processed them
-        for i in 0..=gba_last_frame.min(frame_graph.len() - 1) {
-            if frame_graph.states[i].state == OptimizationState::Optimized {
-                frame_graph.set_state(i, OptimizationState::Fixed);
-            }
         }
         
         // Marginalize intermediate (non-keyframe) frames to maintain window size
         // This only affects frames between keyframes, not the keyframes themselves
-        let mut optimized_non_keyframe_count = frame_graph
+        let mut optimized_count = frame_graph
             .states
             .iter()
-            .filter(|s| s.state == OptimizationState::Optimized && s.role != FrameRole::Keyframe)
+            .filter(|s| s.state == OptimizationState::Optimized)
             .count();
 
-        while optimized_non_keyframe_count > WINDOW_SIZE {
+        while optimized_count > WINDOW_SIZE {
             // Find oldest optimized non-keyframe and mark for marginalization
             for i in 0..frame_graph.len() {
-                if frame_graph.states[i].state == OptimizationState::Optimized 
-                    && frame_graph.states[i].role != FrameRole::Keyframe {
+                if frame_graph.states[i].state == OptimizationState::Optimized {
                     frame_graph.set_state(i, OptimizationState::Marginalize);
                     break;
                 }
             }
-            optimized_non_keyframe_count -= 1;
+            optimized_count -= 1;
         }
 
-        // VIO now uses point priors from GBA as soft constraints
-        // Points with priors are optimized, not fixed, but have prior residuals
-        // that pull them towards their GBA-optimized positions with appropriate uncertainty
-
-        // Run VIO optimization on current window with inter-keyframe priors
-        let result = run_vio_bundle_adjustment(
+        // Run simple VIO optimization on current window
+        let result = run_simple_vio_bundle_adjustment(
             &stereo_camera,
             &frame_graph,
             &mut world,
@@ -616,18 +381,16 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             &mut imu_states,
             &preintegrations,
             gravity_vec,
-            &gba_point_priors,
-            &inter_keyframe_priors,
+            accumulated_prior.as_ref(),
             &config,
         );
 
         let vio_time = result.solve_time_ms;
         total_vio_time += vio_time;
 
-        // Handle marginalization result
+        // Handle marginalization result - accumulate priors
         if let Some(new_prior) = result.new_prior {
-            // Update or create pending prior
-            pending_prior = Some(new_prior);
+            accumulated_prior = Some(new_prior);
         }
 
         // Mark marginalized frames as inactive now that marginalization is done
@@ -708,34 +471,10 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // Handle inter-keyframe prior for keyframes
-        let inter_kf_prior_to_send = if should_create_keyframe {
-            // This frame is a keyframe - finalize the pending prior
-            let prior = pending_prior.take();
-            
-            // Add the prior to our list for use in LBA
-            if let Some(ref p) = prior {
-                inter_keyframe_priors.push(p.clone());
-                
-                // Drop priors where both endpoints are now fixed by GBA
-                let gba_last = gba_last_optimized_frame.unwrap_or(0);
-                inter_keyframe_priors.retain(|p| {
-                    // Keep if at least one pose is still optimized (not fixed by GBA)
-                    p.pose_ids.iter().any(|&pose_id| pose_id > gba_last)
-                });
-            }
-            
+        // Track keyframe index
+        if should_create_keyframe {
             last_keyframe_idx = frame_idx;
-            prior
-        } else {
-            None
-        };
-
-        // Get IMU state for this frame
-        let imu_state_for_frame = imu_states.get(frame_idx).cloned();
-
-        // Send frame to GBA with inter-keyframe prior (if this is a keyframe)
-        slam_system.send_to_gba(frame_idx, &world, inter_kf_prior_to_send, imu_state_for_frame);
+        }
 
         // Visualize current state
         visualize_estimate(
@@ -775,7 +514,6 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✅ Processed {} frames", n_frames);
     println!("   Final map: {} points", world.num_points());
-    println!("   GBA updates received: {}", gba_update_count);
     println!(
         "\n📊 Final memory: {:.1} MB, Peak: {:.1} MB",
         get_rss_mb(),
@@ -801,9 +539,6 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
     println!("   - metrics/gba_impact/*: How much GBA changes poses");
     println!("   - metrics/constraint/*: LBA constraint covariances sent to GBA");
     println!("   - metrics/point_priors/*: Point prior information from GBA");
-
-    // Cleanup: wait for GBA thread to finish
-    drop(slam_system);
 
     Ok(())
 }

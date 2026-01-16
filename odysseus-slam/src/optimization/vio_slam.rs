@@ -5,6 +5,7 @@ use crate::imu::preintegration::PreintegratedImu;
 use crate::imu::residuals::{bias_residual, imu_preintegration_residual};
 use crate::imu::types::ImuFrameState;
 use crate::optimization::select_active_points;
+use crate::optimization::PointPriors;
 use crate::world_state::WorldState;
 use nalgebra::{DVector, Vector3};
 use odysseus_solver::math3d::Vec3;
@@ -69,11 +70,15 @@ pub struct VioResult {
     pub new_prior: Option<super::VioMarginalizedPrior>,
 }
 
-/// Run simple VIO bundle adjustment (no GBA, no inter-keyframe priors)
+/// Run tightly-coupled VIO bundle adjustment
 ///
-/// This is a simplified version for basic VIO without the complexity of
-/// inter-keyframe priors used when integrating with GBA.
-pub fn run_simple_vio_bundle_adjustment(
+/// Points with priors (from GBA) are kept fixed for performance, but their
+/// uncertainty is used to scale visual residuals - uncertain points contribute
+/// less to constraining poses.
+///
+/// Inter-keyframe priors provide constraints between consecutive keyframes,
+/// connecting optimized keyframes to fixed keyframes from GBA.
+pub fn run_vio_bundle_adjustment(
     stereo_camera: &StereoCamera<f64>,
     frame_graph: &FrameGraph,
     world: &mut WorldState,
@@ -81,7 +86,8 @@ pub fn run_simple_vio_bundle_adjustment(
     imu_states: &mut Vec<ImuFrameState>,
     preintegrations: &[PreintegratedImu],
     gravity: [f64; 3],
-    prior: Option<&super::VioMarginalizedPrior>,
+    point_priors: &PointPriors,
+    inter_keyframe_priors: &[super::VioMarginalizedPrior],
     config: &VioConfig,
 ) -> VioResult {
     let n_frames = world.frames.len();
@@ -109,6 +115,10 @@ pub fn run_simple_vio_bundle_adjustment(
         })
         .collect();
 
+    // Points with priors from GBA are kept fixed for performance
+    // Their uncertainty will be used to scale visual residuals instead
+    let fixed_point_ids: HashSet<usize> = point_priors.priors.keys().copied().collect();
+
     let (optimized_point_ids, all_point_ids) = select_active_points(
         &all_obs,
         |obs| obs.point_id,
@@ -120,7 +130,7 @@ pub fn run_simple_vio_bundle_adjustment(
                 .map(|s| s.is_optimized())
                 .unwrap_or(false)
         },
-        &HashSet::new(),
+        &fixed_point_ids,
         config.max_active_points,
     );
 
@@ -196,7 +206,11 @@ pub fn run_simple_vio_bundle_adjustment(
     let n_imu_residuals = n_imu_factors * 9;
     let n_bias_residuals = n_imu_factors * 6;
     
-    let n_prior_residuals = prior.map(|p| p.sqrt_information.nrows()).unwrap_or(0);
+    // Count inter-keyframe prior residuals
+    let n_prior_residuals: usize = inter_keyframe_priors
+        .iter()
+        .map(|p| p.sqrt_information.nrows())
+        .sum();
     
     let n_residuals = n_visual_residuals + n_imu_residuals + n_bias_residuals + n_prior_residuals;
 
@@ -237,15 +251,18 @@ pub fn run_simple_vio_bundle_adjustment(
         }
     }
 
-    // Prior entries
-    if let Some(p) = prior {
-        let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
-        let entries_for_prior = p.sparsity_entries(
-            prior_res_start,
+    // Inter-keyframe prior entries
+    let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
+    let mut current_prior_res_offset = prior_res_start;
+    
+    for prior in inter_keyframe_priors {
+        let entries_for_prior = prior.sparsity_entries(
+            current_prior_res_offset,
             &pose_to_param_idx,
             &point_to_param_idx,
         );
         entries.extend(entries_for_prior);
+        current_prior_res_offset += prior.sqrt_information.nrows();
     }
 
     entries.sort();
@@ -292,17 +309,10 @@ pub fn run_simple_vio_bundle_adjustment(
     let mut final_error = 0.0;
     let mut converged = false;
 
-    // Convert single prior to slice for cost function
-    let prior_slice: &[super::VioMarginalizedPrior] = if let Some(p) = prior {
-        std::slice::from_ref(p)
-    } else {
-        &[]
-    };
-
     let optimized = solver.solve(
         initial_params,
         |params, residuals, jacobian_data| {
-            compute_simple_vio_cost(
+            compute_vio_cost(
                 params,
                 residuals,
                 jacobian_data,
@@ -315,7 +325,8 @@ pub fn run_simple_vio_bundle_adjustment(
                 stereo_camera,
                 &gravity,
                 config,
-                prior_slice,
+                point_priors,
+                inter_keyframe_priors,
                 n_visual_residuals,
                 n_imu_residuals,
                 n_bias_residuals,
@@ -377,7 +388,7 @@ pub fn run_simple_vio_bundle_adjustment(
             frame_graph,
             &pose_to_param_idx,
             &point_to_param_idx,
-            &HashSet::new(), // No fixed points in simple VIO
+            &fixed_point_ids,
         ))
     } else {
         None
@@ -396,7 +407,7 @@ pub fn run_simple_vio_bundle_adjustment(
         // Need to compute Jacobian at optimized params for marginalization
         use odysseus_solver::sparse_solver::build_jacobian;
         
-        // Rebuild sparsity entries (same as used in optimization, but without prior)
+        // Rebuild sparsity entries (same as used in optimization)
         let mut entries = Vec::new();
         
         // Visual entries
@@ -465,12 +476,12 @@ pub fn run_simple_vio_bundle_adjustment(
         
         let marg_n_imu_residuals = n_imu_factors * 9;
         let marg_n_bias_residuals = n_imu_factors * 6;
-        let marg_n_residuals = n_visual_residuals + marg_n_imu_residuals + marg_n_bias_residuals;
-        let mut jacobian = build_jacobian::<f64>(&entries, marg_n_residuals, n_params);
-        let mut residuals = vec![0.0; marg_n_residuals];
+        let n_residuals = n_visual_residuals + marg_n_imu_residuals + marg_n_bias_residuals;
+        let mut jacobian = build_jacobian::<f64>(&entries, n_residuals, n_params);
+        let mut residuals = vec![0.0; n_residuals];
         
-        // Recompute cost at optimized params to get Jacobian (no prior for fresh marginalization)
-        compute_simple_vio_cost(
+        // Recompute cost at optimized params to get Jacobian (no inter-keyframe priors for fresh marginalization)
+        compute_vio_cost(
             &optimized,
             &mut residuals,
             jacobian.data_mut(),
@@ -483,7 +494,8 @@ pub fn run_simple_vio_bundle_adjustment(
             stereo_camera,
             &gravity,
             config,
-            &[], // No prior when computing fresh marginalization
+            point_priors,
+            &[], // No inter-keyframe priors when computing fresh marginalization
             n_visual_residuals,
             marg_n_imu_residuals,
             marg_n_bias_residuals,
@@ -525,7 +537,7 @@ pub fn run_simple_vio_bundle_adjustment(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compute_simple_vio_cost(
+fn compute_vio_cost(
     params: &DVector<f64>,
     residuals: &mut [f64],
     jacobian_data: &mut [f64],
@@ -538,7 +550,8 @@ fn compute_simple_vio_cost(
     stereo_camera: &StereoCamera<f64>,
     gravity: &[f64; 3],
     config: &VioConfig,
-    priors: &[super::VioMarginalizedPrior],
+    point_priors: &PointPriors,
+    inter_keyframe_priors: &[super::VioMarginalizedPrior],
     n_visual_residuals: usize,
     n_imu_residuals: usize,
     n_bias_residuals: usize,
@@ -546,11 +559,40 @@ fn compute_simple_vio_cost(
     let mut jac_cursor = 0;
 
     // 1. Visual Cost
+    // For fixed points with priors, we scale residuals by uncertainty.
+    // The weight is derived from the point's information matrix:
+    // Higher information (more certain) → weight closer to 1
+    // Lower information (uncertain) → weight closer to 0
     for (obs_idx, obs) in visual_obs.iter().enumerate() {
         let opt_pose = pose_to_param_idx.contains_key(&obs.camera_id);
         let opt_point = point_to_param_idx.contains_key(&obs.point_id);
 
+        // Compute uncertainty weight for this observation
+        // For optimized points: weight = 1 (full contribution)
+        // For fixed points with priors: weight based on information
+        let uncertainty_weight = if !opt_point {
+            if let Some(prior) = point_priors.get(obs.point_id) {
+                // Use trace of information matrix as a measure of certainty
+                // Normalize by expected information scale to get reasonable weights
+                let info_trace = prior.information[(0, 0)]
+                    + prior.information[(1, 1)]
+                    + prior.information[(2, 2)];
+                // Expected trace for a well-observed point (roughly)
+                const EXPECTED_INFO_TRACE: f64 = 1000.0;
+                // Weight: saturates at 1 for high information, falls off for low
+                (info_trace / (info_trace + EXPECTED_INFO_TRACE)).sqrt()
+            } else {
+                // Fixed point without prior - full weight (it's trusted)
+                1.0
+            }
+        } else {
+            // Optimized point - full weight
+            1.0
+        };
+
         // Use Jet for autodiff
+        // Visual residual only depends on 6 pose params + 3 point params
+        // We'll use Jet9 to match bundle_adjustment's structure
         type JetV = Jet<f64, 9>;
 
         let rot_host = &world.frames[obs.camera_id].pose.rotation_host;
@@ -576,12 +618,14 @@ fn compute_simple_vio_cost(
         let pt_params: [JetV; 3] = if opt_point {
             let base = point_to_param_idx[&obs.point_id];
             let offset = if opt_pose { 6 } else { 0 };
+            // Point params are [direction_u, direction_v, inv_depth]
             std::array::from_fn(|i| JetV::variable(params[base + i], offset + i))
         } else {
+            // Fixed point - use current inverse depth parameters
             [
-                JetV::constant(pt_info.direction.0),
-                JetV::constant(pt_info.direction.1),
-                JetV::constant(pt_info.inv_depth),
+                JetV::constant(pt_info.direction.0),  // direction_u
+                JetV::constant(pt_info.direction.1),  // direction_v
+                JetV::constant(pt_info.inv_depth),    // inverse depth
             ]
         };
 
@@ -595,11 +639,12 @@ fn compute_simple_vio_cost(
             JetV::constant(stereo_camera.baseline),
         );
 
+        // Use inverse depth residual
         let (r1, r2, r3, r4) = crate::optimization::stereo_reprojection_residual_inverse_depth(
             rot_host,
             &pose_params,
             &pt_params,
-            &pt_info.host_pose,
+            &pt_info.host_pose,  // Fixed host pose from point
             &camera_jet,
             JetV::constant(obs.left_u),
             JetV::constant(obs.left_v),
@@ -612,26 +657,55 @@ fn compute_simple_vio_cost(
             let mut r_val = r.value;
             let mut deriv_slice = if opt_pose && opt_point {
                 [
-                    r.derivs[0], r.derivs[1], r.derivs[2], r.derivs[3], r.derivs[4], r.derivs[5],
-                    r.derivs[6], r.derivs[7], r.derivs[8],
+                    r.derivs[0],
+                    r.derivs[1],
+                    r.derivs[2],
+                    r.derivs[3],
+                    r.derivs[4],
+                    r.derivs[5],
+                    r.derivs[6],
+                    r.derivs[7],
+                    r.derivs[8],
                 ]
             } else if opt_pose {
                 [
-                    r.derivs[0], r.derivs[1], r.derivs[2], r.derivs[3], r.derivs[4], r.derivs[5],
-                    0.0, 0.0, 0.0,
+                    r.derivs[0],
+                    r.derivs[1],
+                    r.derivs[2],
+                    r.derivs[3],
+                    r.derivs[4],
+                    r.derivs[5],
+                    0.0,
+                    0.0,
+                    0.0,
                 ]
             } else {
-                [r.derivs[0], r.derivs[1], r.derivs[2], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                [
+                    r.derivs[0],
+                    r.derivs[1],
+                    r.derivs[2],
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
             };
 
             let n_active = (if opt_pose { 6 } else { 0 }) + (if opt_point { 3 } else { 0 });
             apply_huber_loss(config.huber_delta, &mut r_val, &mut deriv_slice[..n_active]);
 
-            // Apply observation noise weighting
+            // Apply observation noise weighting (information matrix = 1/variance)
+            // This ensures residuals are properly weighted relative to IMU residuals
             let obs_weight = 1.0 / (config.obs_std_dev * config.obs_std_dev);
-            r_val *= obs_weight;
+            
+            // Combined weight: observation noise * point uncertainty
+            let combined_weight = obs_weight * uncertainty_weight;
+            
+            r_val *= combined_weight;
             for d in &mut deriv_slice[..n_active] {
-                *d *= obs_weight;
+                *d *= combined_weight;
             }
 
             residuals[obs_idx * 4 + i] = r_val;
@@ -745,6 +819,7 @@ fn compute_simple_vio_cost(
 
     // 3. Bias Cost
     let bias_res_base = imu_res_base + (n_frames - 1) * 9;
+    // For bias residual we use f64 directly as it's simple linear
     for i in 0..n_frames - 1 {
         let res_idx = bias_res_base + i * 6;
         let opt_i = pose_to_param_idx.get(&i);
@@ -797,6 +872,7 @@ fn compute_simple_vio_cost(
 
             if opt_i.is_some() {
                 for p in 0..6 {
+                    // Only biases (9-14)
                     jacobian_data[jac_cursor] = if p == r_idx { -w } else { 0.0 };
                     jac_cursor += 1;
                 }
@@ -810,22 +886,20 @@ fn compute_simple_vio_cost(
         }
     }
 
-    // 4. Prior Cost (single prior if any)
-    if !priors.is_empty() {
-        let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
-        let mut current_prior_res_offset = prior_res_start;
-        
-        for prior in priors {
-            jac_cursor = prior.apply_to_cost(
-                params,
-                residuals,
-                jacobian_data,
-                jac_cursor,
-                current_prior_res_offset,
-                pose_to_param_idx,
-                point_to_param_idx,
-            );
-            current_prior_res_offset += prior.sqrt_information.nrows();
-        }
+    // 4. Inter-Keyframe Prior Cost
+    let prior_res_start = n_visual_residuals + n_imu_residuals + n_bias_residuals;
+    let mut current_prior_res_offset = prior_res_start;
+    
+    for prior in inter_keyframe_priors {
+        jac_cursor = prior.apply_to_cost(
+            params,
+            residuals,
+            jacobian_data,
+            jac_cursor,
+            current_prior_res_offset,
+            pose_to_param_idx,
+            point_to_param_idx,
+        );
+        current_prior_res_offset += prior.sqrt_information.nrows();
     }
 }
