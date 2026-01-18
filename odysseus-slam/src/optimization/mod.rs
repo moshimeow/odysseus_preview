@@ -72,12 +72,12 @@ macro_rules! with_jet_size {
 pub(crate) use with_jet_size;
 
 /// Convert an f64 array to constant jets (no derivatives)
-pub(crate) fn jet_constants<const N: usize, const D: usize>(arr: &[f64; N]) -> [Jet<f64, D>; N] {
+pub fn jet_constants<const N: usize, const D: usize>(arr: &[f64; N]) -> [Jet<f64, D>; N] {
     std::array::from_fn(|i| Jet::constant(arr[i]))
 }
 
 /// Create variable jets from consecutive params with sequential derivative indices
-pub(crate) fn jet_variables<
+pub fn jet_variables<
     const N: usize,
     const D: usize,
     P: std::ops::Index<usize, Output = f64>,
