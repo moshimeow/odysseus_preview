@@ -340,8 +340,10 @@ mod tests {
 
         // u = 500 * (1/2) + 320 = 250 + 320 = 570
         // v = 500 * (0.5/2) + 240 = 125 + 240 = 365
-        assert_abs_diff_eq!(u, 570.0, epsilon = 1e-10);
-        assert_abs_diff_eq!(v, 365.0, epsilon = 1e-10);
+        let expected_u = 500.0 * (1.0/2.0) + 320.0;
+        let expected_v = 500.0 * (0.5/2.0) + 240.0;
+        assert_abs_diff_eq!(u, expected_u, epsilon = 1e-10);
+        assert_abs_diff_eq!(v, expected_v, epsilon = 1e-10);
     }
 
     #[test]
