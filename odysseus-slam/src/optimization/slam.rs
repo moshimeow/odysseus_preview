@@ -488,7 +488,7 @@ fn compute_ba_cost(
     huber_delta: f64,
     obs_std_dev: f64,
     prior: Option<&MarginalizedPrior>,
-    n_obs_residuals: usize,
+    n_obs_residuals: usize, // likely redundant with observations.len()
 ) {
     // Cursor into jacobian_data - we write linearly in row-major order
     let mut jac_cursor = 0;

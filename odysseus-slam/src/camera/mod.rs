@@ -255,6 +255,38 @@ impl<T: Real> PinholeCamera<T> {
     }
 }
 
+impl PinholeCamera<f64> {
+    /// Convert to a camera with Jet values for automatic differentiation.
+    ///
+    /// All parameters become constant Jets (derivatives are zero).
+    /// This is useful when the camera intrinsics are fixed during optimization.
+    pub fn to_jet<const N: usize>(&self) -> PinholeCamera<odysseus_solver::Jet<f64, N>> {
+        use odysseus_solver::Jet;
+        PinholeCamera::new(
+            Jet::constant(self.fx),
+            Jet::constant(self.fy),
+            Jet::constant(self.cx),
+            Jet::constant(self.cy),
+        )
+    }
+}
+
+impl PinholeCamera<f32> {
+    /// Convert to a camera with Jet values for automatic differentiation.
+    ///
+    /// All parameters become constant Jets (derivatives are zero).
+    /// This is useful when the camera intrinsics are fixed during optimization.
+    pub fn to_jet<const N: usize>(&self) -> PinholeCamera<odysseus_solver::Jet<f32, N>> {
+        use odysseus_solver::Jet;
+        PinholeCamera::new(
+            Jet::constant(self.fx),
+            Jet::constant(self.fy),
+            Jet::constant(self.cx),
+            Jet::constant(self.cy),
+        )
+    }
+}
+
 /// Stereo camera pair with a horizontal baseline
 ///
 /// Standard stereo setup:
@@ -400,6 +432,29 @@ mod tests {
         assert_abs_diff_eq!(u.derivs[0], 100.0, epsilon = 1e-6);
         // dv/dY should be fy/Z = 500/5 = 100
         assert_abs_diff_eq!(v.derivs[1], 100.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_to_jet() {
+        use odysseus_solver::Jet;
+
+        // Create a regular f64 camera
+        let camera_f64: PinholeCamera<f64> = PinholeCamera::new(500.0, 600.0, 320.0, 240.0);
+
+        // Convert to Jet camera
+        let camera_jet: PinholeCamera<Jet<f64, 4>> = camera_f64.to_jet();
+
+        // Values should be preserved
+        assert_abs_diff_eq!(camera_jet.fx.value, 500.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(camera_jet.fy.value, 600.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(camera_jet.cx.value, 320.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(camera_jet.cy.value, 240.0, epsilon = 1e-10);
+
+        // Derivatives should all be zero (constant)
+        assert!(camera_jet.fx.derivs.iter().all(|&d| d == 0.0));
+        assert!(camera_jet.fy.derivs.iter().all(|&d| d == 0.0));
+        assert!(camera_jet.cx.derivs.iter().all(|&d| d == 0.0));
+        assert!(camera_jet.cy.derivs.iter().all(|&d| d == 0.0));
     }
 
     #[test]

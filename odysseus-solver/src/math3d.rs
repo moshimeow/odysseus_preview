@@ -113,6 +113,37 @@ impl<T: Real> std::ops::Div<T> for Vec3<T> {
 }
 
 // Note: RHS multiplication (scalar * Vec3) is tricky with generics and orphan rules.
+
+// ============================================================================
+// Conversions from nalgebra
+// ============================================================================
+
+impl<T: Copy> From<nalgebra::Vector3<T>> for Vec3<T> {
+    fn from(v: nalgebra::Vector3<T>) -> Self {
+        Self {
+            x: v[0],
+            y: v[1],
+            z: v[2],
+        }
+    }
+}
+
+impl<T: Copy> From<&nalgebra::Vector3<T>> for Vec3<T> {
+    fn from(v: &nalgebra::Vector3<T>) -> Self {
+        Self {
+            x: v[0],
+            y: v[1],
+            z: v[2],
+        }
+    }
+}
+
+impl<T> From<[T; 3]> for Vec3<T> {
+    fn from(arr: [T; 3]) -> Self {
+        let [x, y, z] = arr;
+        Self { x, y, z }
+    }
+}
 // For now, we only provide Vec3 * scalar and Vec3 / scalar.
 
 // ============================================================================
@@ -294,6 +325,21 @@ impl<T: Real> Quat<T> {
             x: T::zero() - self.x,
             y: T::zero() - self.y,
             z: T::zero() - self.z,
+        }
+    }
+
+    /// Quaternion inverse: q^(-1) = conjugate(q) / |q|²
+    ///
+    /// For unit quaternions (rotation quaternions), this is equivalent to conjugate.
+    /// For non-unit quaternions, this computes the true multiplicative inverse.
+    pub fn inverse(self) -> Self {
+        let norm_sq = self.norm_squared();
+        let conj = self.conjugate();
+        Self {
+            w: conj.w / norm_sq,
+            x: conj.x / norm_sq,
+            y: conj.y / norm_sq,
+            z: conj.z / norm_sq,
         }
     }
 
@@ -597,6 +643,20 @@ pub fn transform_point<T: Real>(
     point: Vec3<T>,
 ) -> Vec3<T> {
     let rotated = rotation.mul_vec(point);
+    Vec3 {
+        x: rotated.x + translation.x,
+        y: rotated.y + translation.y,
+        z: rotated.z + translation.z,
+    }
+}
+
+/// Apply a rigid transformation: point_transformed = R * point + translation
+pub fn transform_point_quat<T: Real>(
+    rotation: Quat<T>,
+    translation: Vec3<T>,
+    point: Vec3<T>,
+) -> Vec3<T> {
+    let rotated = rotation.rotate_vec(point);
     Vec3 {
         x: rotated.x + translation.x,
         y: rotated.y + translation.y,

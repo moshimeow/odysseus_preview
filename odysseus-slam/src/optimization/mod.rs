@@ -89,6 +89,27 @@ pub fn jet_variables<
     std::array::from_fn(|i| Jet::variable(params[param_offset + i], deriv_offset + i))
 }
 
+/// Create a Vec3 of variable jets from a nalgebra Vector3
+pub fn jet_vec3_variable<const D: usize>(
+    v: &nalgebra::Vector3<f64>,
+    deriv_offset: usize,
+) -> Vec3<Jet<f64, D>> {
+    Vec3::new(
+        Jet::variable(v.x, deriv_offset),
+        Jet::variable(v.y, deriv_offset + 1),
+        Jet::variable(v.z, deriv_offset + 2),
+    )
+}
+
+/// Create a Vec3 of constant jets from a nalgebra Vector3
+pub fn jet_vec3_constant<const D: usize>(v: &nalgebra::Vector3<f64>) -> Vec3<Jet<f64, D>> {
+    Vec3::new(
+        Jet::constant(v.x),
+        Jet::constant(v.y),
+        Jet::constant(v.z),
+    )
+}
+
 /// Compute stereo reprojection residual with host-relative rotation parameterization
 ///
 /// The pose is parameterized as:
