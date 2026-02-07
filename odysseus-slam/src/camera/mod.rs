@@ -260,7 +260,7 @@ impl PinholeCamera<f64> {
     ///
     /// All parameters become constant Jets (derivatives are zero).
     /// This is useful when the camera intrinsics are fixed during optimization.
-    pub fn to_jet<const N: usize>(&self) -> PinholeCamera<odysseus_solver::Jet<f64, N>> {
+    pub fn to_constant<const N: usize>(&self) -> PinholeCamera<odysseus_solver::Jet<f64, N>> {
         use odysseus_solver::Jet;
         PinholeCamera::new(
             Jet::constant(self.fx),

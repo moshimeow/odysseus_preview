@@ -21,6 +21,46 @@ impl<T: Copy> Vec3<T> {
     pub const fn new(x: T, y: T, z: T) -> Self {
         Self { x, y, z }
     }
+
+    /// Convert to a Vec3 of a different Real type, treating values as constants
+    ///
+    /// This is useful for converting e.g. Vec3<f64> to Vec3<Jet<f64, N>>
+    /// where the f64 values become constant Jets (zero derivatives).
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> Vec3<U> {
+        Vec3 {
+            x: U::constant(self.x),
+            y: U::constant(self.y),
+            z: U::constant(self.z),
+        }
+    }
+
+    /// Convert to a Vec3 of Jets, treating values as variables with sequential derivative indices
+    ///
+    /// - x gets derivative index `deriv_offset`
+    /// - y gets derivative index `deriv_offset + 1`
+    /// - z gets derivative index `deriv_offset + 2`
+    ///
+    /// Example:
+    /// ```
+    /// use odysseus_solver::math3d::Vec3;
+    /// use odysseus_solver::Jet;
+    ///
+    /// let v = Vec3::new(1.0, 2.0, 3.0);
+    /// let v_jet: Vec3<Jet<f64, 6>> = v.to_variable(3);
+    /// // v_jet.x has derivative 1.0 at index 3
+    /// // v_jet.y has derivative 1.0 at index 4
+    /// // v_jet.z has derivative 1.0 at index 5
+    /// ```
+    pub fn to_variable<const N: usize>(self, deriv_offset: usize) -> Vec3<crate::Jet<T, N>>
+    where
+        T: Default + num_traits::One,
+    {
+        Vec3 {
+            x: crate::Jet::variable(self.x, deriv_offset),
+            y: crate::Jet::variable(self.y, deriv_offset + 1),
+            z: crate::Jet::variable(self.z, deriv_offset + 2),
+        }
+    }
 }
 
 impl<T: Real> Vec3<T> {
@@ -143,7 +183,13 @@ impl<T> From<[T; 3]> for Vec3<T> {
         let [x, y, z] = arr;
         Self { x, y, z }
     }
-}
+}               
+                                                                                                                   
+impl<T: Copy> From<&[T; 3]> for Vec3<T> {                                                                                        
+    fn from(arr: &[T; 3]) -> Self {                                                                                              
+        Self { x: arr[0], y: arr[1], z: arr[2] }                                                                                 
+    }                                                                                                                            
+}   
 // For now, we only provide Vec3 * scalar and Vec3 / scalar.
 
 // ============================================================================
@@ -164,6 +210,29 @@ impl<T: Copy> Mat3<T> {
             x_axis,
             y_axis,
             z_axis,
+        }
+    }
+
+    /// Convert to a Mat3 of a different Real type, treating values as constants
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> Mat3<U> {
+        Mat3 {
+            x_axis: self.x_axis.to_constant(),
+            y_axis: self.y_axis.to_constant(),
+            z_axis: self.z_axis.to_constant(),
+        }
+    }
+
+    /// Convert to a Mat3 of Jets, treating values as variables with sequential derivative indices
+    ///
+    /// Uses column-major ordering: x_axis (0-2), y_axis (3-5), z_axis (6-8)
+    pub fn to_variable<const N: usize>(self, deriv_offset: usize) -> Mat3<crate::Jet<T, N>>
+    where
+        T: Default + num_traits::One,
+    {
+        Mat3 {
+            x_axis: self.x_axis.to_variable(deriv_offset),
+            y_axis: self.y_axis.to_variable(deriv_offset + 3),
+            z_axis: self.z_axis.to_variable(deriv_offset + 6),
         }
     }
 
@@ -304,6 +373,35 @@ pub struct Quat<T> {
 impl<T: Copy> Quat<T> {
     pub const fn new(w: T, x: T, y: T, z: T) -> Self {
         Self { w, x, y, z }
+    }
+
+    /// Convert to a Quat of a different Real type, treating values as constants
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> Quat<U> {
+        Quat {
+            w: U::constant(self.w),
+            x: U::constant(self.x),
+            y: U::constant(self.y),
+            z: U::constant(self.z),
+        }
+    }
+
+    /// Convert to a Quat of Jets, treating values as variables with sequential derivative indices
+    ///
+    /// Order: w (offset), x (offset+1), y (offset+2), z (offset+3)
+    ///
+    /// Note: For rotation optimization, you typically parameterize with 3 axis-angle
+    /// parameters rather than 4 quaternion components. This method is provided for
+    /// cases where you need all 4 components as variables.
+    pub fn to_variable<const N: usize>(self, deriv_offset: usize) -> Quat<crate::Jet<T, N>>
+    where
+        T: Default + num_traits::One,
+    {
+        Quat {
+            w: crate::Jet::variable(self.w, deriv_offset),
+            x: crate::Jet::variable(self.x, deriv_offset + 1),
+            y: crate::Jet::variable(self.y, deriv_offset + 2),
+            z: crate::Jet::variable(self.z, deriv_offset + 3),
+        }
     }
 }
 
@@ -678,6 +776,58 @@ mod tests {
         let a = Vec3::new(1.0, 2.0, 3.0);
         let b = Vec3::new(4.0, 5.0, 6.0);
         assert_eq!(a.dot(b), 32.0); // 1*4 + 2*5 + 3*6 = 32
+    }
+
+    #[test]
+    fn test_to_constant() {
+        type Jet6 = Jet<f64, 6>;
+
+        // Vec3<f64> -> Vec3<Jet<f64, 6>>
+        let v_f64 = Vec3::new(1.0, 2.0, 3.0);
+        let v_jet: Vec3<Jet6> = v_f64.to_constant();
+
+        assert_eq!(v_jet.x.value, 1.0);
+        assert_eq!(v_jet.y.value, 2.0);
+        assert_eq!(v_jet.z.value, 3.0);
+        // All derivatives should be zero (constant)
+        assert!(v_jet.x.derivs.iter().all(|&d| d == 0.0));
+        assert!(v_jet.y.derivs.iter().all(|&d| d == 0.0));
+        assert!(v_jet.z.derivs.iter().all(|&d| d == 0.0));
+
+        // Can now do operations with Jet variables
+        let rx = Jet6::variable(0.1, 0);
+        let ry = Jet6::variable(0.2, 1);
+        let rz = Jet6::variable(0.3, 2);
+        let rotation = Vec3::new(rx, ry, rz);
+        let q = Quat::from_axis_angle(rotation);
+
+        // Rotate the constant point - result has derivatives wrt rotation
+        let rotated = q.rotate_vec(v_jet);
+        assert!(rotated.x.derivs.iter().any(|&d| d != 0.0));
+    }
+
+    #[test]
+    fn test_to_variable() {
+        type Jet6 = Jet<f64, 6>;
+
+        // Vec3<f64> -> Vec3<Jet<f64, 6>> as variables starting at offset 2
+        let v_f64 = Vec3::new(1.0, 2.0, 3.0);
+        let v_jet: Vec3<Jet6> = v_f64.to_variable(2);
+
+        // Values should be preserved
+        assert_eq!(v_jet.x.value, 1.0);
+        assert_eq!(v_jet.y.value, 2.0);
+        assert_eq!(v_jet.z.value, 3.0);
+
+        // Derivatives should be 1.0 at the correct indices
+        assert_eq!(v_jet.x.derivs[2], 1.0); // x at offset 2
+        assert_eq!(v_jet.y.derivs[3], 1.0); // y at offset 3
+        assert_eq!(v_jet.z.derivs[4], 1.0); // z at offset 4
+
+        // Other derivatives should be 0
+        assert_eq!(v_jet.x.derivs[0], 0.0);
+        assert_eq!(v_jet.x.derivs[1], 0.0);
+        assert_eq!(v_jet.x.derivs[3], 0.0);
     }
 
     #[test]
