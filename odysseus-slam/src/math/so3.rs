@@ -5,7 +5,7 @@
 
 use odysseus_solver::math3d::{Mat3, Quat, Vec3};
 use odysseus_solver::Real;
-use std::ops::Mul;
+use std::ops::{Add, Mul, Sub};
 
 /// SO(3) rotation representation
 ///
@@ -60,7 +60,14 @@ impl<T: Real> SO3<T> {
     ///
     /// # Returns
     /// * Rotated vector
-    pub fn rotate(&self, v: Vec3<T>) -> Vec3<T> {
+    pub fn rotate<S: Copy, R: Sub<Output = R> + Add<Output = R> + Copy>(
+        &self,
+        v: Vec3<S>,
+    ) -> Vec3<R>
+    where
+        T: Mul<S, Output = R> + Mul<R, Output = R>,
+        S: Add<R, Output = R>,
+    {
         self.quat.rotate_vec(v)
     }
 
@@ -112,11 +119,15 @@ impl SO3<f64> {
 }
 
 /// Composition: SO3 * SO3
-impl<T: Real> Mul for SO3<T> {
-    type Output = Self;
+impl<T: Real, S: Copy, R> Mul<SO3<S>> for SO3<T>
+where
+    T: Mul<S, Output = R>,
+    R: Sub<Output = R> + Add<Output = R> + Copy,
+{
+    type Output = SO3<R>;
 
-    fn mul(self, rhs: Self) -> Self {
-        Self {
+    fn mul(self, rhs: SO3<S>) -> SO3<R> {
+        SO3 {
             quat: self.quat * rhs.quat,
         }
     }

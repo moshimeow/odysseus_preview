@@ -4,6 +4,7 @@
 //! enabling the same code to work with or without autodiff.
 
 use crate::Real;
+use std::ops::{Add, Mul, Sub};
 
 // ============================================================================
 // Vec3 - 3D Vector
@@ -116,11 +117,14 @@ impl<T: Real> std::ops::Sub for Vec3<T> {
     }
 }
 
-impl<T: Real> std::ops::Add for Vec3<T> {
-    type Output = Self;
+impl<R, T> std::ops::Add<Vec3<T>> for Vec3<R>
+where
+    R: Add<T, Output = R>,
+{
+    type Output = Vec3<R>;
 
-    fn add(self, other: Self) -> Self {
-        Self {
+    fn add(self, other: Vec3<T>) -> Vec3<R> {
+        Vec3 {
             x: self.x + other.x,
             y: self.y + other.y,
             z: self.z + other.z,
@@ -477,8 +481,12 @@ impl<T: Real> Quat<T> {
     /// Hamilton product (quaternion multiplication)
     ///
     /// q1 * q2 represents applying rotation q1 after q2
-    pub fn mul(self, other: Self) -> Self {
-        Self {
+    pub fn mul<S: Copy, R>(self, other: Quat<S>) -> Quat<R>
+    where
+        T: Mul<S, Output = R>,
+        R: Sub<Output = R> + Add<Output = R> + Copy,
+    {
+        Quat {
             w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z,
             x: self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
             y: self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
@@ -490,7 +498,12 @@ impl<T: Real> Quat<T> {
     ///
     /// Uses the optimized formula: v' = v + 2w(q_xyz × v) + 2(q_xyz × (q_xyz × v))
     /// which avoids full quaternion multiplication.
-    pub fn rotate_vec(self, v: Vec3<T>) -> Vec3<T> {
+    pub fn rotate_vec<S: Copy, R>(self, v: Vec3<S>) -> Vec3<R>
+    where
+        T: Mul<S, Output = R> + Mul<R, Output = R>,
+        S: Add<R, Output = R>,
+        R: Sub<Output = R> + Add<Output = R> + Copy,
+    {
         // t = 2 * (q_xyz × v)
         let tx = T::from_literal(2.0) * (self.y * v.z - self.z * v.y);
         let ty = T::from_literal(2.0) * (self.z * v.x - self.x * v.z);
@@ -661,10 +674,14 @@ impl Quat<f64> {
 }
 
 // Quaternion multiplication via Mul trait
-impl<T: Real> std::ops::Mul for Quat<T> {
-    type Output = Self;
+impl<T: Real, S: Copy, R> std::ops::Mul<Quat<S>> for Quat<T>
+where
+    T: Mul<S, Output = R>,
+    R: Sub<Output = R> + Add<Output = R> + Copy,
+{
+    type Output = Quat<R>;
 
-    fn mul(self, other: Self) -> Self {
+    fn mul(self, other: Quat<S>) -> Quat<R> {
         self.mul(other)
     }
 }
@@ -1048,7 +1065,7 @@ mod tests {
         let rvec = Vec3::new(0.3, 0.4, 0.5);
         let q = Quat::from_axis_angle(rvec);
         let q_inv = q.conjugate();
-        let identity = q * q_inv;
+        let identity: Quat<f64> = q * q_inv;
 
         // Should be close to identity
         assert!((identity.w - 1.0).abs() < 1e-5);
@@ -1074,8 +1091,8 @@ mod tests {
 
             // Test by rotating a point
             let p = Vec3::new(1.0, 2.0, 3.0);
-            let r1 = q.rotate_vec(p);
-            let r2 = q_recovered.rotate_vec(p);
+            let r1: Vec3<f64> = q.rotate_vec(p);
+            let r2: Vec3<f64> = q_recovered.rotate_vec(p);
 
             assert!(
                 (r1.x - r2.x).abs() < 1e-4,

@@ -6,7 +6,7 @@
 use super::SO3;
 use odysseus_solver::math3d::Vec3;
 use odysseus_solver::{Jet, Real};
-use std::ops::Mul;
+use std::ops::{Add, Mul, Sub};
 
 /// SE(3) rigid transformation (rotation + translation)
 ///
@@ -248,7 +248,12 @@ impl<T: Real> SE3<T> {
     ///
     /// # Returns
     /// * Transformed point
-    pub fn transform_point(&self, point: Vec3<T>) -> Vec3<T> {
+    pub fn transform_point<S: Copy, R>(&self, point: Vec3<S>) -> Vec3<R>
+    where
+        T: Mul<S, Output = R> + Mul<R, Output = R>,
+        S: Add<R, Output = R>,
+        R: Sub<Output = R> + Add<Output = R> + Add<T, Output = R> + Copy,
+    {
         self.rotation.rotate(point) + self.translation
     }
 
@@ -267,11 +272,18 @@ impl<T: Real> SE3<T> {
 /// Composition: SE3 * SE3
 ///
 /// Combines two transformations: (R1, t1) * (R2, t2) = (R1*R2, R1*t2 + t1)
-impl<T: Real> Mul for SE3<T> {
-    type Output = Self;
+///
+/// Supports mixed types: e.g. SE3<f64> * SE3<Jet> → SE3<Jet>
+impl<T: Real, S: Copy, R> Mul<SE3<S>> for SE3<T>
+where
+    T: Mul<S, Output = R> + Mul<R, Output = R>,
+    S: Add<R, Output = R>,
+    R: Sub<Output = R> + Add<Output = R> + Add<T, Output = R> + Copy,
+{
+    type Output = SE3<R>;
 
-    fn mul(self, rhs: Self) -> Self {
-        Self {
+    fn mul(self, rhs: SE3<S>) -> SE3<R> {
+        SE3 {
             rotation: self.rotation * rhs.rotation,
             translation: self.rotation.rotate(rhs.translation) + self.translation,
         }

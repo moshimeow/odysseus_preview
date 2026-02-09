@@ -2,6 +2,7 @@
 
 use odysseus_solver::math3d::Vec3;
 use odysseus_solver::Real;
+use std::ops::{Add, Mul};
 
 /// Kannala-Brandt fisheye camera model (KB4)
 ///
@@ -219,13 +220,17 @@ impl<T: Real> PinholeCamera<T> {
     ///
     /// # Note
     /// The point must be in front of the camera (Z > 0) for a valid projection.
-    pub fn project(&self, point_cam: Vec3<T>) -> (T, T) {
-        // Perspective division
-        let inv_z = T::one() / point_cam.z;
+    pub fn project<S: Real, R>(&self, point_cam: Vec3<S>) -> (R, R)
+    where
+        T: Mul<S, Output = R>,
+        R: Add<T, Output = R>,
+    {
+        // Perspective division: S / S → S, S * S → S
+        let inv_z = S::one() / point_cam.z;
         let x_normalized = point_cam.x * inv_z;
         let y_normalized = point_cam.y * inv_z;
 
-        // Apply intrinsics
+        // Apply intrinsics: T * S → R, then R + T → R
         let u = self.fx * x_normalized + self.cx;
         let v = self.fy * y_normalized + self.cy;
 

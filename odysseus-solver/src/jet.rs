@@ -163,6 +163,130 @@ impl_jet_arithmetic!(f32);
 impl_jet_arithmetic!(f64);
 
 // ============================================================================
+// Mixed Jet-scalar Arithmetic (avoids zero-derivative allocation)
+// ============================================================================
+
+macro_rules! impl_jet_scalar_arithmetic {
+    ($T:ty) => {
+        // Jet + scalar
+        impl<const N: usize> Add<$T> for Jet<$T, N> {
+            type Output = Self;
+
+            fn add(self, rhs: $T) -> Self {
+                let result = Self {
+                    value: self.value + rhs,
+                    derivs: self.derivs,
+                };
+                result.check_nan("add(jet,scalar)");
+                result
+            }
+        }
+
+        // scalar + Jet
+        impl<const N: usize> Add<Jet<$T, N>> for $T {
+            type Output = Jet<$T, N>;
+
+            fn add(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
+                let result = Jet {
+                    value: self + rhs.value,
+                    derivs: rhs.derivs,
+                };
+                result.check_nan("add(scalar,jet)");
+                result
+            }
+        }
+
+        // Jet - scalar
+        impl<const N: usize> Sub<$T> for Jet<$T, N> {
+            type Output = Self;
+
+            fn sub(self, rhs: $T) -> Self {
+                let result = Self {
+                    value: self.value - rhs,
+                    derivs: self.derivs,
+                };
+                result.check_nan("sub(jet,scalar)");
+                result
+            }
+        }
+
+        // scalar - Jet
+        impl<const N: usize> Sub<Jet<$T, N>> for $T {
+            type Output = Jet<$T, N>;
+
+            fn sub(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
+                let result = Jet {
+                    value: self - rhs.value,
+                    derivs: std::array::from_fn(|i| -rhs.derivs[i]),
+                };
+                result.check_nan("sub(scalar,jet)");
+                result
+            }
+        }
+
+        // Jet * scalar
+        impl<const N: usize> Mul<$T> for Jet<$T, N> {
+            type Output = Self;
+
+            fn mul(self, rhs: $T) -> Self {
+                let result = Self {
+                    value: self.value * rhs,
+                    derivs: std::array::from_fn(|i| self.derivs[i] * rhs),
+                };
+                result.check_nan("mul(jet,scalar)");
+                result
+            }
+        }
+
+        // scalar * Jet
+        impl<const N: usize> Mul<Jet<$T, N>> for $T {
+            type Output = Jet<$T, N>;
+
+            fn mul(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
+                let result = Jet {
+                    value: self * rhs.value,
+                    derivs: std::array::from_fn(|i| self * rhs.derivs[i]),
+                };
+                result.check_nan("mul(scalar,jet)");
+                result
+            }
+        }
+
+        // Jet / scalar
+        impl<const N: usize> Div<$T> for Jet<$T, N> {
+            type Output = Self;
+
+            fn div(self, rhs: $T) -> Self {
+                let result = Self {
+                    value: self.value / rhs,
+                    derivs: std::array::from_fn(|i| self.derivs[i] / rhs),
+                };
+                result.check_nan("div(jet,scalar)");
+                result
+            }
+        }
+
+        // scalar / Jet
+        impl<const N: usize> Div<Jet<$T, N>> for $T {
+            type Output = Jet<$T, N>;
+
+            fn div(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
+                let b_squared = rhs.value * rhs.value;
+                let result = Jet {
+                    value: self / rhs.value,
+                    derivs: std::array::from_fn(|i| -self * rhs.derivs[i] / b_squared),
+                };
+                result.check_nan("div(scalar,jet)");
+                result
+            }
+        }
+    };
+}
+
+impl_jet_scalar_arithmetic!(f32);
+impl_jet_scalar_arithmetic!(f64);
+
+// ============================================================================
 // Mathematical Functions (specialized for f32 and f64)
 // ============================================================================
 
@@ -495,5 +619,67 @@ mod tests {
         let result_jet = quadratic(x_jet);
         assert_eq!(result_jet.value, 7.0);
         assert_eq!(result_jet.derivs[0], 5.0); // d/dx(x^2 + x + 1) = 2x + 1 = 5
+    }
+
+    #[test]
+    fn test_mixed_add() {
+        let x = Jet::<f64, 2>::variable(3.0, 0);
+        // Jet + scalar
+        let r1 = x + 5.0;
+        let r2 = x + Jet::constant(5.0);
+        assert_eq!(r1.value, r2.value);
+        assert_eq!(r1.derivs, r2.derivs);
+        // scalar + Jet
+        let r3 = 5.0 + x;
+        assert_eq!(r3.value, r2.value);
+        assert_eq!(r3.derivs, r2.derivs);
+    }
+
+    #[test]
+    fn test_mixed_sub() {
+        let x = Jet::<f64, 2>::variable(3.0, 0);
+        // Jet - scalar
+        let r1 = x - 5.0;
+        let r2 = x - Jet::constant(5.0);
+        assert_eq!(r1.value, r2.value);
+        assert_eq!(r1.derivs, r2.derivs);
+        // scalar - Jet
+        let r3 = 5.0 - x;
+        let r4 = Jet::constant(5.0) - x;
+        assert_eq!(r3.value, r4.value);
+        assert_eq!(r3.derivs, r4.derivs);
+    }
+
+    #[test]
+    fn test_mixed_mul() {
+        let x = Jet::<f64, 2>::variable(3.0, 0);
+        // Jet * scalar
+        let r1 = x * 5.0;
+        let r2 = x * Jet::constant(5.0);
+        assert_eq!(r1.value, r2.value);
+        assert_eq!(r1.derivs, r2.derivs);
+        // scalar * Jet
+        let r3 = 5.0 * x;
+        assert_eq!(r3.value, r2.value);
+        assert_eq!(r3.derivs, r2.derivs);
+    }
+
+    #[test]
+    fn test_mixed_div() {
+        let x = Jet::<f64, 2>::variable(3.0, 0);
+        // Jet / scalar
+        let r1 = x / 5.0;
+        let r2 = x / Jet::constant(5.0);
+        assert!((r1.value - r2.value).abs() < 1e-15);
+        for i in 0..2 {
+            assert!((r1.derivs[i] - r2.derivs[i]).abs() < 1e-15);
+        }
+        // scalar / Jet
+        let r3 = 5.0 / x;
+        let r4 = Jet::constant(5.0) / x;
+        assert!((r3.value - r4.value).abs() < 1e-15);
+        for i in 0..2 {
+            assert!((r3.derivs[i] - r4.derivs[i]).abs() < 1e-15);
+        }
     }
 }
