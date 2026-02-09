@@ -442,7 +442,7 @@ mod tests {
         let camera_f64: PinholeCamera<f64> = PinholeCamera::new(500.0, 600.0, 320.0, 240.0);
 
         // Convert to Jet camera
-        let camera_jet: PinholeCamera<Jet<f64, 4>> = camera_f64.to_jet();
+        let camera_jet: PinholeCamera<Jet<f64, 4>> = camera_f64.to_constant();
 
         // Values should be preserved
         assert_abs_diff_eq!(camera_jet.fx.value, 500.0, epsilon = 1e-10);

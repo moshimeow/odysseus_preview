@@ -5,7 +5,7 @@
 
 use super::SO3;
 use odysseus_solver::math3d::Vec3;
-use odysseus_solver::Real;
+use odysseus_solver::{Jet, Real};
 use std::ops::Mul;
 
 /// SE(3) rigid transformation (rotation + translation)
@@ -18,6 +18,130 @@ pub struct SE3<T> {
     pub rotation: SO3<T>,
     /// Translation component
     pub translation: Vec3<T>,
+}
+
+/// Element of the Lie algebra se(3) — tangent vector to SE(3).
+///
+/// Represents the 6-DOF tangent space parameterization of a rigid transformation:
+/// a rotation vector (axis-angle) and a translation vector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SE3Tangent<T> {
+    /// Axis-angle rotation vector (omega)
+    pub rotation: Vec3<T>,
+    /// Translation vector (v)
+    pub translation: Vec3<T>,
+}
+
+impl<T: Real> SE3Tangent<T> {
+    /// Create a new tangent vector from rotation and translation components
+    pub fn new(rotation: Vec3<T>, translation: Vec3<T>) -> Self {
+        Self {
+            rotation,
+            translation,
+        }
+    }
+
+    /// Create the zero tangent vector (identity element of the Lie algebra)
+    pub fn zero() -> Self {
+        Self {
+            rotation: Vec3::new(T::zero(), T::zero(), T::zero()),
+            translation: Vec3::new(T::zero(), T::zero(), T::zero()),
+        }
+    }
+
+    /// Exponential map: se(3) -> SE(3)
+    ///
+    /// Converts this tangent vector [omega, v] to a rigid transformation.
+    /// The translation component is not directly v, but V(omega) * v, where V is the
+    /// left Jacobian of SO(3).
+    pub fn exp(&self) -> SE3<T> {
+        let omega = self.rotation;
+        let v = self.translation;
+
+        // Rotation part
+        let rotation = SO3::exp(omega);
+
+        // Translation part: t = V(omega) * v
+        // V(omega) = I + ((1-cos(theta))/theta^2)*K + ((theta-sin(theta))/theta^3)*K^2
+        // where K = [omega]_x (skew-symmetric matrix)
+
+        let theta_sq = omega.dot(omega);
+        let theta = theta_sq.sqrt();
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        // Taylor series for small angles
+        let taylor_b = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 24.0);
+        let taylor_c = T::from_literal(1.0 / 6.0) - theta_sq * T::from_literal(1.0 / 120.0);
+
+        // Exact formulas with safe division
+        let eps_sq = T::from_literal(1e-20);
+        let theta_sq_safe = theta_sq + eps_sq;
+        let theta_cubed_safe = theta_sq_safe * (theta_sq + eps_sq).sqrt();
+
+        let exact_b = (T::one() - cos_theta) / theta_sq_safe;
+        let exact_c = (theta - sin_theta) / theta_cubed_safe;
+
+        // Blend between Taylor and exact
+        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
+        let b = taylor_b * (T::one() - blend) + exact_b * blend;
+        let c = taylor_c * (T::one() - blend) + exact_c * blend;
+
+        // Compute V * v = v + b * (omega x v) + c * (omega x (omega x v))
+        let omega_cross_v = omega.cross(v);
+        let translation = v + omega_cross_v * b + omega.cross(omega_cross_v) * c;
+
+        SE3 {
+            rotation,
+            translation,
+        }
+    }
+
+    /// Convert to an SE3Tangent of a different Real type, treating values as constants
+    ///
+    /// Useful for converting e.g. SE3Tangent<f64> to SE3Tangent<Jet<f64, N>>
+    /// where the f64 values become constant Jets (zero derivatives).
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> SE3Tangent<U> {
+        SE3Tangent {
+            rotation: self.rotation.to_constant(),
+            translation: self.translation.to_constant(),
+        }
+    }
+}
+
+impl<T: Copy + Default + num_traits::One> SE3Tangent<T> {
+    /// Convert to an SE3Tangent of Jets, treating values as variables with sequential derivative indices
+    ///
+    /// - rotation gets derivative indices `deriv_offset..deriv_offset+3`
+    /// - translation gets derivative indices `deriv_offset+3..deriv_offset+6`
+    pub fn to_variable<const N: usize>(self, deriv_offset: usize) -> SE3Tangent<Jet<T, N>> {
+        SE3Tangent {
+            rotation: self.rotation.to_variable(deriv_offset),
+            translation: self.translation.to_variable(deriv_offset + 3),
+        }
+    }
+}
+
+impl<T: Real> From<[T; 6]> for SE3Tangent<T> {
+    fn from(arr: [T; 6]) -> Self {
+        Self {
+            rotation: Vec3::new(arr[0], arr[1], arr[2]),
+            translation: Vec3::new(arr[3], arr[4], arr[5]),
+        }
+    }
+}
+
+impl<T: Real> From<SE3Tangent<T>> for [T; 6] {
+    fn from(tangent: SE3Tangent<T>) -> [T; 6] {
+        [
+            tangent.rotation.x,
+            tangent.rotation.y,
+            tangent.rotation.z,
+            tangent.translation.x,
+            tangent.translation.y,
+            tangent.translation.z,
+        ]
+    }
 }
 
 impl<T: Real> SE3<T> {
@@ -52,78 +176,23 @@ impl<T: Real> SE3<T> {
     /// # Returns
     /// * SE(3) transformation
     pub fn exp(tangent: [T; 6]) -> Self {
-        let omega = Vec3::new(tangent[0], tangent[1], tangent[2]);
-        let v = Vec3::new(tangent[3], tangent[4], tangent[5]);
-
-        // Rotation part
-        let rotation = SO3::exp(omega);
-
-        // Translation part: t = V(omega) * v
-        // V(omega) = I + ((1-cos(theta))/theta^2)*K + ((theta-sin(theta))/theta^3)*K^2
-        // where K = [omega]_x (skew-symmetric matrix)
-
-        let theta_sq = omega.x * omega.x + omega.y * omega.y + omega.z * omega.z;
-        let theta = theta_sq.sqrt();
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        // Taylor series for small angles
-        let taylor_b = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 24.0);
-        let taylor_c = T::from_literal(1.0 / 6.0) - theta_sq * T::from_literal(1.0 / 120.0);
-
-        // Exact formulas with safe division
-        let eps_sq = T::from_literal(1e-20);
-        let theta_sq_safe = theta_sq + eps_sq;
-        let theta_cubed_safe = theta_sq_safe * (theta_sq + eps_sq).sqrt();
-
-        let exact_b = (T::one() - cos_theta) / theta_sq_safe;
-        let exact_c = (theta - sin_theta) / theta_cubed_safe;
-
-        // Blend between Taylor and exact
-        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
-        let b = taylor_b * (T::one() - blend) + exact_b * blend;
-        let c = taylor_c * (T::one() - blend) + exact_c * blend;
-
-        // Compute V * v
-        // V * v = v + b * (omega x v) + c * (omega x (omega x v))
-        let omega_cross_v = Vec3::new(
-            omega.y * v.z - omega.z * v.y,
-            omega.z * v.x - omega.x * v.z,
-            omega.x * v.y - omega.y * v.x,
-        );
-
-        let omega_cross_omega_cross_v = Vec3::new(
-            omega.y * omega_cross_v.z - omega.z * omega_cross_v.y,
-            omega.z * omega_cross_v.x - omega.x * omega_cross_v.z,
-            omega.x * omega_cross_v.y - omega.y * omega_cross_v.x,
-        );
-
-        let translation = Vec3::new(
-            v.x + b * omega_cross_v.x + c * omega_cross_omega_cross_v.x,
-            v.y + b * omega_cross_v.y + c * omega_cross_omega_cross_v.y,
-            v.z + b * omega_cross_v.z + c * omega_cross_omega_cross_v.z,
-        );
-
-        Self {
-            rotation,
-            translation,
-        }
+        SE3Tangent::from(tangent).exp()
     }
 
     /// Logarithm map: SE(3) -> se(3)
     ///
-    /// Converts a rigid transformation to a 6D tangent vector.
+    /// Converts a rigid transformation to a tangent vector.
     ///
     /// # Returns
-    /// * 6D tangent vector [omega_x, omega_y, omega_z, v_x, v_y, v_z]
-    pub fn log(&self) -> [T; 6] {
+    /// * SE3Tangent containing the rotation vector and translation components
+    pub fn log(&self) -> SE3Tangent<T> {
         // Rotation part
         let omega = self.rotation.log();
 
         // Translation part: v = V^(-1) * t
         // V^(-1) = I - 0.5*K + (1/theta^2 - (1+cos(theta))/(2*theta*sin(theta)))*K^2
 
-        let theta_sq = omega.x * omega.x + omega.y * omega.y + omega.z * omega.z;
+        let theta_sq = omega.dot(omega);
         let theta = theta_sq.sqrt();
         let sin_theta = theta.sin();
         let cos_theta = theta.cos();
@@ -148,27 +217,15 @@ impl<T: Real> SE3<T> {
         let b = taylor_b * (T::one() - blend) + exact_b * blend;
         let c = taylor_c * (T::one() - blend) + exact_c * blend;
 
-        // Compute V^(-1) * t
+        // Compute V^(-1) * t = t + b * (omega x t) + c * (omega x (omega x t))
         let t = self.translation;
-        let omega_cross_t = Vec3::new(
-            omega.y * t.z - omega.z * t.y,
-            omega.z * t.x - omega.x * t.z,
-            omega.x * t.y - omega.y * t.x,
-        );
+        let omega_cross_t = omega.cross(t);
+        let v = t + omega_cross_t * b + omega.cross(omega_cross_t) * c;
 
-        let omega_cross_omega_cross_t = Vec3::new(
-            omega.y * omega_cross_t.z - omega.z * omega_cross_t.y,
-            omega.z * omega_cross_t.x - omega.x * omega_cross_t.z,
-            omega.x * omega_cross_t.y - omega.y * omega_cross_t.x,
-        );
-
-        let v = Vec3::new(
-            t.x + b * omega_cross_t.x + c * omega_cross_omega_cross_t.x,
-            t.y + b * omega_cross_t.y + c * omega_cross_omega_cross_t.y,
-            t.z + b * omega_cross_t.z + c * omega_cross_omega_cross_t.z,
-        );
-
-        [omega.x, omega.y, omega.z, v.x, v.y, v.z]
+        SE3Tangent {
+            rotation: omega,
+            translation: v,
+        }
     }
 
     /// Convert to an SE3 of a different Real type, treating values as constants
@@ -192,12 +249,7 @@ impl<T: Real> SE3<T> {
     /// # Returns
     /// * Transformed point
     pub fn transform_point(&self, point: Vec3<T>) -> Vec3<T> {
-        let rotated = self.rotation.rotate(point);
-        Vec3::new(
-            rotated.x + self.translation.x,
-            rotated.y + self.translation.y,
-            rotated.z + self.translation.z,
-        )
+        self.rotation.rotate(point) + self.translation
     }
 
     /// Get the inverse transformation
@@ -205,15 +257,9 @@ impl<T: Real> SE3<T> {
     /// For SE(3), the inverse is: [R, t]^(-1) = [R^T, -R^T * t]
     pub fn inverse(&self) -> Self {
         let r_inv = self.rotation.inverse();
-        let t_inv = r_inv.rotate(Vec3::new(
-            T::zero() - self.translation.x,
-            T::zero() - self.translation.y,
-            T::zero() - self.translation.z,
-        ));
-
         Self {
             rotation: r_inv,
-            translation: t_inv,
+            translation: r_inv.rotate(-self.translation),
         }
     }
 }
@@ -227,11 +273,7 @@ impl<T: Real> Mul for SE3<T> {
     fn mul(self, rhs: Self) -> Self {
         Self {
             rotation: self.rotation * rhs.rotation,
-            translation: Vec3::new(
-                self.rotation.rotate(rhs.translation).x + self.translation.x,
-                self.rotation.rotate(rhs.translation).y + self.translation.y,
-                self.rotation.rotate(rhs.translation).z + self.translation.z,
-            ),
+            translation: self.rotation.rotate(rhs.translation) + self.translation,
         }
     }
 }
@@ -306,7 +348,7 @@ mod tests {
         for tangent in test_cases {
             let pose = SE3::exp(tangent);
             let tangent_recovered = pose.log();
-            let pose_recovered = SE3::exp(tangent_recovered);
+            let pose_recovered = tangent_recovered.exp();
 
             // Test by transforming a point
             let p = Vec3::new(1.0, 2.0, 3.0);
@@ -330,7 +372,7 @@ mod tests {
 
         for tangent in test_cases {
             let pose = SE3::exp(tangent);
-            let tangent_recovered = pose.log();
+            let tangent_recovered: [f64; 6] = pose.log().into();
 
             for i in 0..6 {
                 assert_abs_diff_eq!(tangent_recovered[i], tangent[i], epsilon = 1e-6);

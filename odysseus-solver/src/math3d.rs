@@ -152,6 +152,18 @@ impl<T: Real> std::ops::Div<T> for Vec3<T> {
     }
 }
 
+impl<T: Real> std::ops::Neg for Vec3<T> {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Self {
+            x: T::zero() - self.x,
+            y: T::zero() - self.y,
+            z: T::zero() - self.z,
+        }
+    }
+}
+
 // Note: RHS multiplication (scalar * Vec3) is tricky with generics and orphan rules.
 
 // ============================================================================

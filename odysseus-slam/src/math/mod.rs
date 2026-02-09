@@ -6,3 +6,4 @@ pub mod stereographic;
 
 pub use so3::SO3;
 pub use se3::SE3;
+pub use se3::SE3Tangent;

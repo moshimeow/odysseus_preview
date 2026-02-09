@@ -283,7 +283,7 @@ impl TrajectoryGenerator for BrownianTrajectory {
         // Random walk from there
         for _ in 1..n_cameras {
             let prev_pose = poses.last().unwrap();
-            let prev_tangent = prev_pose.log();
+            let prev_tangent: [f64; 6] = prev_pose.log().into();
 
             // Add random step to each component
             let delta_omega_x = rng.gen_range(-self.orientation_step..self.orientation_step);

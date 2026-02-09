@@ -5567,6 +5567,7 @@ dependencies = [
  "exr",
  "image 0.24.9",
  "nalgebra 0.32.6",
+ "num-traits",
  "odysseus-slam-frontend",
  "odysseus-solver",
  "rand 0.8.5",

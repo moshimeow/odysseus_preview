@@ -23,7 +23,7 @@ pub mod world_state;
 pub use camera::{PinholeCamera, StereoCamera};
 pub use frame_graph::{FrameGraph, FrameRole, FrameState, OptimizationState};
 pub use geometry::{Point3D, StereoObservation};
-pub use math::{SE3, SO3};
+pub use math::{SE3, SE3Tangent, SO3};
 pub use odysseus_solver::{Jet, Real};
 pub use optimization::{run_bundle_adjustment, BundleAdjustmentConfig, BundleAdjustmentResult};
 pub use slam_system::{GbaToLbaMsg, LbaToGbaMsg, SlamSystem};
