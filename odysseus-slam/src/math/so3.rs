@@ -71,6 +71,16 @@ impl<T: Real> SO3<T> {
         }
     }
 
+    /// Convert to an SO3 of a different Real type, treating values as constants
+    ///
+    /// This is useful for converting e.g. SO3<f64> to SO3<Jet<f64, N>>
+    /// where the f64 values become constant Jets (zero derivatives).
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> SO3<U> {
+        SO3 {
+            quat: self.quat.to_constant(),
+        }
+    }
+
     /// Normalize the quaternion to unit length
     ///
     /// This corrects for numerical drift after many quaternion multiplications.

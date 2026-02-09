@@ -171,6 +171,17 @@ impl<T: Real> SE3<T> {
         [omega.x, omega.y, omega.z, v.x, v.y, v.z]
     }
 
+    /// Convert to an SE3 of a different Real type, treating values as constants
+    ///
+    /// This is useful for converting e.g. SE3<f64> to SE3<Jet<f64, N>>
+    /// where the f64 values become constant Jets (zero derivatives).
+    pub fn to_constant<U: Real<Scalar = T>>(self) -> SE3<U> {
+        SE3 {
+            rotation: self.rotation.to_constant(),
+            translation: self.translation.to_constant(),
+        }
+    }
+
     /// Transform a 3D point
     ///
     /// Applies the transformation: point_out = R * point_in + t
