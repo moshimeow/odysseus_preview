@@ -357,6 +357,27 @@ macro_rules! impl_jet_math {
                 result
             }
 
+            /// Exponential: exp(a + da) = exp(a) + exp(a) * da
+            pub fn exp(self) -> Self {
+                let exp_a = self.value.exp();
+                let result = Self {
+                    value: exp_a,
+                    derivs: std::array::from_fn(|i| exp_a * self.derivs[i]),
+                };
+                result.check_nan("exp");
+                result
+            }
+
+            /// Natural logarithm: ln(a + da) = ln(a) + da/a
+            pub fn ln(self) -> Self {
+                let result = Self {
+                    value: self.value.ln(),
+                    derivs: std::array::from_fn(|i| self.derivs[i] / self.value),
+                };
+                result.check_nan("ln");
+                result
+            }
+
             /// Absolute value (non-differentiable at 0, uses sign)
             pub fn abs(self) -> Self {
                 let sign = self.value.signum();
@@ -400,6 +421,8 @@ pub trait Real:
     fn abs(self) -> Self;
     fn powi(self, n: i32) -> Self;
     fn acos(self) -> Self;
+    fn exp(self) -> Self;
+    fn ln(self) -> Self;
 
     fn constant(value: Self::Scalar) -> Self; //
     fn from_literal(value: f64) -> Self;  // Convert f64 to Self (works for literals and variables)
@@ -434,6 +457,12 @@ impl Real for f64 {
     }
     fn acos(self) -> Self {
         f64::acos(self)
+    }
+    fn exp(self) -> Self {
+        f64::exp(self)
+    }
+    fn ln(self) -> Self {
+        f64::ln(self)
     }
     fn constant(value: f64) -> Self {
         value
@@ -479,6 +508,12 @@ impl Real for f32 {
     }
     fn acos(self) -> Self {
         f32::acos(self)
+    }
+    fn exp(self) -> Self {
+        f32::exp(self)
+    }
+    fn ln(self) -> Self {
+        f32::ln(self)
     }
     fn constant(value: f32) -> Self {
         value
@@ -526,6 +561,12 @@ macro_rules! impl_real_for_jet {
             }
             fn acos(self) -> Self {
                 self.acos()
+            }
+            fn exp(self) -> Self {
+                self.exp()
+            }
+            fn ln(self) -> Self {
+                self.ln()
             }
             fn constant(value: $T) -> Self {
                 Jet::constant(value)
