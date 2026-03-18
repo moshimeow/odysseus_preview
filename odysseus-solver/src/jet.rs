@@ -413,7 +413,7 @@ pub trait Real:
     + Neg<Output = Self>
     + Sized
 {
-    type Scalar: Copy + Default;
+    type Scalar: Copy + Default + PartialOrd;
 
     fn sin(self) -> Self;
     fn cos(self) -> Self;

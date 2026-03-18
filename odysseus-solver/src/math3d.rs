@@ -565,14 +565,20 @@ impl<T: Real> Quat<T> {
     ///
     /// Returns the rotation vector ω = θ * axis where θ = 2 * acos(w)
     pub fn to_axis_angle(self) -> Vec3<T> {
+        // Canonicalize to w >= 0 to stay on the principal branch (angle in [0, π]).
+        // Negating a quaternion gives the same rotation but flips the sign of w,
+        // so we always work with the representative that has w >= 0.
+        let sign = if self.w.scalar() < T::Scalar::default() { -T::one() } else { T::one() };
+        let (x, y, z, w) = (sign * self.x, sign * self.y, sign * self.z, sign * self.w);
+
         // θ = 2 * acos(w), but we need to handle the sign of w
         // For unit quaternion, |xyz| = sin(θ/2)
-        let xyz_norm_sq = self.x * self.x + self.y * self.y + self.z * self.z;
+        let xyz_norm_sq = x * x + y * y + z * z;
         let xyz_norm = xyz_norm_sq.sqrt();
 
         // half_theta = asin(|xyz|) or acos(w)
         // Using acos(w) for the angle
-        let half_theta = self.w.acos();
+        let half_theta = w.acos();
         let theta = half_theta * T::from_literal(2.0);
         let theta_sq = theta * theta;
 
@@ -588,9 +594,9 @@ impl<T: Real> Quat<T> {
         let k = taylor_k * (T::one() - blend) + exact_k * blend;
 
         Vec3 {
-            x: k * self.x,
-            y: k * self.y,
-            z: k * self.z,
+            x: k * x,
+            y: k * y,
+            z: k * z,
         }
     }
 
