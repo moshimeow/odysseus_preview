@@ -576,9 +576,11 @@ impl<T: Real> Quat<T> {
         let xyz_norm_sq = x * x + y * y + z * z;
         let xyz_norm = xyz_norm_sq.sqrt();
 
-        // half_theta = asin(|xyz|) or acos(w)
-        // Using acos(w) for the angle
-        let half_theta = w.acos();
+        // half_theta = asin(|xyz|) or acos(w).
+        // Clamp w above 1 to defend against FP drift on products of near-unit quats
+        // (w.acos() is NaN for w > 1). Canonicalization above already guarantees w ≥ 0.
+        let w_safe = if w.scalar() > T::one().scalar() { T::one() } else { w };
+        let half_theta = w_safe.acos();
         let theta = half_theta * T::from_literal(2.0);
         let theta_sq = theta * theta;
 
