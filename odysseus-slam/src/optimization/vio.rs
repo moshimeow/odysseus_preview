@@ -1,7 +1,7 @@
 use crate::camera::StereoCamera;
 use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
-use crate::imu::preintegration::PreintegratedImu;
+use crate::imu::preintegration::{Matrix9, PreintegratedImu};
 use crate::imu::residuals::{bias_residual, imu_preintegration_residual};
 use crate::imu::types::ImuFrameState;
 use crate::optimization::select_active_points;
@@ -524,6 +524,22 @@ pub fn run_simple_vio_bundle_adjustment(
     }
 }
 
+/// Compute the sqrt-information matrix for an IMU preintegration factor.
+///
+/// Returns L^{-1} where cov = L L^T (Cholesky). Weighting residuals by this
+/// matrix is equivalent to premultiplying by sqrt(Sigma^{-1}), which correctly
+/// balances IMU residuals against visual residuals in the joint cost.
+/// Falls back to identity when the covariance is singular (e.g. zero delta_time).
+fn imu_sqrt_information(cov: &Matrix9<f64>) -> Matrix9<f64> {
+    if let Some(chol) = nalgebra::Cholesky::new(*cov) {
+        if let Some(l_inv) = chol.l().try_inverse() {
+            return l_inv;
+        }
+    }
+    Matrix9::identity()
+}
+
+
 #[allow(clippy::too_many_arguments)]
 fn compute_simple_vio_cost(
     params: &DVector<f64>,
@@ -725,18 +741,42 @@ fn compute_simple_vio_cost(
             &gravity_jet,
         );
 
+        // Collect raw Jacobian blocks before applying information weighting
+        let jac_i: Option<[[f64; 15]; 9]> = opt_i.map(|_| {
+            std::array::from_fn(|k| std::array::from_fn(|p| res[k].derivs[p]))
+        });
+        let jac_j: Option<[[f64; 15]; 9]> = opt_j.map(|_| {
+            let off = if opt_i.is_some() { 15 } else { 0 };
+            std::array::from_fn(|k| std::array::from_fn(|p| res[k].derivs[off + p]))
+        });
+
+        // Weight residuals and Jacobians by sqrt-information (L^{-1} where cov = L L^T)
+        let sqrt_info = imu_sqrt_information(&preintegrations[i].covariance);
+
         for r_idx in 0..9 {
-            residuals[res_idx + r_idx] = res[r_idx].value;
-            if opt_i.is_some() {
+            let mut weighted_r = 0.0;
+            for k in 0..9 {
+                weighted_r += sqrt_info[(r_idx, k)] * res[k].value;
+            }
+            residuals[res_idx + r_idx] = weighted_r;
+
+            if let Some(ref ji) = jac_i {
                 for p in 0..15 {
-                    jacobian_data[jac_cursor] = res[r_idx].derivs[p];
+                    let mut wj = 0.0;
+                    for k in 0..9 {
+                        wj += sqrt_info[(r_idx, k)] * ji[k][p];
+                    }
+                    jacobian_data[jac_cursor] = wj;
                     jac_cursor += 1;
                 }
             }
-            if opt_j.is_some() {
-                let off = if opt_i.is_some() { 15 } else { 0 };
+            if let Some(ref jj) = jac_j {
                 for p in 0..15 {
-                    jacobian_data[jac_cursor] = res[r_idx].derivs[off + p];
+                    let mut wj = 0.0;
+                    for k in 0..9 {
+                        wj += sqrt_info[(r_idx, k)] * jj[k][p];
+                    }
+                    jacobian_data[jac_cursor] = wj;
                     jac_cursor += 1;
                 }
             }

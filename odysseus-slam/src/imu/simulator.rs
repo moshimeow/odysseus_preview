@@ -30,6 +30,10 @@ pub struct ImuNoiseParams {
     pub gyro_bias_random_walk: f64,
     /// Accelerometer bias random walk (m/s³/√Hz)
     pub accel_bias_random_walk: f64,
+    /// Initial gyro bias magnitude (rad/s)
+    pub initial_gyro_bias_magnitude: f64,
+    /// Initial accel bias magnitude (m/s²)
+    pub initial_accel_bias_magnitude: f64,
 }
 
 impl ImuNoiseParams {
@@ -40,6 +44,8 @@ impl ImuNoiseParams {
             accel_noise_density: 0.0,
             gyro_bias_random_walk: 0.0,
             accel_bias_random_walk: 0.0,
+            initial_gyro_bias_magnitude: 0.0,
+            initial_accel_bias_magnitude: 0.0,
         }
     }
 
@@ -56,6 +62,9 @@ impl ImuNoiseParams {
             accel_noise_density: 1e-3,
             gyro_bias_random_walk: 4e-6,
             accel_bias_random_walk: 4e-4,
+            // 1 degree per second
+            initial_gyro_bias_magnitude: std::f64::consts::PI / 180.0,
+            initial_accel_bias_magnitude: 0.0,
         }
     }
 }
@@ -76,7 +85,7 @@ pub struct ImuSimulator {
     /// IMU sampling rate (Hz)
     pub imu_rate: f64,
     /// Gravity vector in world frame (m/s²)
-    /// Default: [0, 0, -9.81] (gravity points down in world frame)
+    /// Default: [0, 9.81, 0] (gravity points down in OpenCV world coords)
     pub gravity: Vector3<f64>,
 }
 
@@ -86,7 +95,7 @@ impl ImuSimulator {
         Self {
             noise_params,
             imu_rate,
-            gravity: Vector3::new(0.0, 0.0, -9.81),
+            gravity: Vector3::new(0.0, 9.81, 0.0), // gravity in OpenCV world coords (Y-down)
         }
     }
 
@@ -147,8 +156,8 @@ impl ImuSimulator {
             } else {
                 // Compute from relative rotation: ω = log(R_prev^T * R_curr) / dt
                 let r_rel = pose_prev.rotation.inverse() * pose_curr.rotation;
-                let omega_vec = r_rel.log();
-                Vector3::new(omega_vec.x, omega_vec.y, omega_vec.z) / dt
+                let omega_vec: Vector3<_> = r_rel.log().into();
+                omega_vec / dt
             };
 
             // === Accelerometer: Δv/Δt using analytical velocity ===
@@ -161,20 +170,12 @@ impl ImuSimulator {
             let pose_mid = trajectory.pose(t_mid);
             let r_body_from_world = pose_mid.rotation.inverse();
 
-            let accel_world_vec =
-                odysseus_solver::math3d::Vec3::new(accel_world.x, accel_world.y, accel_world.z);
-            let accel_body_vec = r_body_from_world.rotate(accel_world_vec);
-            let accel_motion_body =
-                Vector3::new(accel_body_vec.x, accel_body_vec.y, accel_body_vec.z);
+            let accel_motion_body: Vector3<_> =
+                r_body_from_world.rotate(accel_world.into()).into();
 
             // Transform gravity to body frame
-            let gravity_body_vec = r_body_from_world.rotate(odysseus_solver::math3d::Vec3::new(
-                self.gravity.x,
-                self.gravity.y,
-                self.gravity.z,
-            ));
-            let gravity_body =
-                Vector3::new(gravity_body_vec.x, gravity_body_vec.y, gravity_body_vec.z);
+            let gravity_body: Vector3<_> =
+                r_body_from_world.rotate(self.gravity.into()).into();
 
             // Accelerometer measures specific force: a_imu = a_motion - g_body
             let accel_body = accel_motion_body - gravity_body;

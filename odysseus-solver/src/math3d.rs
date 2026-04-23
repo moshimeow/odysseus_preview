@@ -201,11 +201,17 @@ impl<T> From<[T; 3]> for Vec3<T> {
     }
 }               
                                                                                                                    
-impl<T: Copy> From<&[T; 3]> for Vec3<T> {                                                                                        
-    fn from(arr: &[T; 3]) -> Self {                                                                                              
-        Self { x: arr[0], y: arr[1], z: arr[2] }                                                                                 
-    }                                                                                                                            
-}   
+impl<T: Copy> From<&[T; 3]> for Vec3<T> {
+    fn from(arr: &[T; 3]) -> Self {
+        Self { x: arr[0], y: arr[1], z: arr[2] }
+    }
+}
+
+impl<T: Copy + nalgebra::Scalar> From<Vec3<T>> for nalgebra::Vector3<T> {
+    fn from(v: Vec3<T>) -> Self {
+        nalgebra::Vector3::new(v.x, v.y, v.z)
+    }
+}
 // For now, we only provide Vec3 * scalar and Vec3 / scalar.
 
 // ============================================================================

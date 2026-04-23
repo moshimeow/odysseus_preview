@@ -35,6 +35,9 @@ pub struct BezierSplineTrajectory {
     pub rotation_curves: Vec<BezierCurve>, // Original Blender curves
     pub rotation_mode: RotationMode,
     pub fps: f64,
+    /// Absolute time (seconds) of the first keyframe.
+    pub start_time: f64,
+    /// Absolute time (seconds) of the last keyframe.
     pub duration: f64,
 }
 
@@ -167,6 +170,11 @@ impl BezierSplineTrajectory {
         ];
         let rot_channels = channels[3..].to_vec();
 
+        let start_time = pos_channels[0]
+            .keyframes
+            .first()
+            .map(|k| k.time)
+            .unwrap_or(0.0);
         let duration = pos_channels[0]
             .keyframes
             .last()
@@ -178,6 +186,7 @@ impl BezierSplineTrajectory {
             rotation_curves: rot_channels,
             rotation_mode: rot_mode,
             fps,
+            start_time,
             duration,
         })
     }
@@ -188,13 +197,13 @@ impl BezierSplineTrajectory {
             return poses;
         }
 
-        let dt = if num_frames > 1 {
-            self.duration / (num_frames - 1) as f64
-        } else {
-            0.0
-        };
         for i in 0..num_frames {
-            poses.push(self.pose(i as f64 * dt));
+            let t = if num_frames > 1 {
+                i as f64 / (num_frames - 1) as f64
+            } else {
+                0.0
+            };
+            poses.push(self.pose(t));
         }
         poses
     }
@@ -202,45 +211,49 @@ impl BezierSplineTrajectory {
 
 impl ContinuousTrajectory for BezierSplineTrajectory {
     fn pose(&self, t: f64) -> SE3<f64> {
+        let t_abs = t * self.duration;
         let p_cv = Vec3::new(
-            self.position_curves[0].evaluate(t),
-            self.position_curves[1].evaluate(t),
-            self.position_curves[2].evaluate(t),
+            self.position_curves[0].evaluate(t_abs),
+            self.position_curves[1].evaluate(t_abs),
+            self.position_curves[2].evaluate(t_abs),
         );
 
+        // W2O: Blender world (+Y up) → OpenCV world (+Y down): X_cv=X_b, Y_cv=-Z_b, Z_cv=Y_b
         let r_pre = na::Matrix3::new(1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0);
-
-        let r_post = na::Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0);
 
         let r_b = match self.rotation_mode {
             RotationMode::EulerXYZ => {
                 let rx = na::UnitQuaternion::from_axis_angle(
                     &na::Vector3::x_axis(),
-                    self.rotation_curves[0].evaluate(t),
+                    self.rotation_curves[0].evaluate(t_abs),
                 );
                 let ry = na::UnitQuaternion::from_axis_angle(
                     &na::Vector3::y_axis(),
-                    self.rotation_curves[1].evaluate(t),
+                    self.rotation_curves[1].evaluate(t_abs),
                 );
                 let rz = na::UnitQuaternion::from_axis_angle(
                     &na::Vector3::z_axis(),
-                    self.rotation_curves[2].evaluate(t),
+                    self.rotation_curves[2].evaluate(t_abs),
                 );
                 (rz * ry * rx).to_rotation_matrix().matrix().clone()
             }
             RotationMode::Quaternion => {
+                // Blender rotation_quaternion channels: [W, X, Y, Z] (W first)
+                // na::Quaternion::new(w, i, j, k)
                 let q = na::UnitQuaternion::from_quaternion(na::Quaternion::new(
-                    self.rotation_curves[1].evaluate(t), // x
-                    self.rotation_curves[2].evaluate(t), // y
-                    self.rotation_curves[3].evaluate(t), // z
-                    self.rotation_curves[0].evaluate(t), // w
+                    self.rotation_curves[0].evaluate(t_abs), // w
+                    self.rotation_curves[1].evaluate(t_abs), // x
+                    self.rotation_curves[2].evaluate(t_abs), // y
+                    self.rotation_curves[3].evaluate(t_abs), // z
                 ));
                 q.to_rotation_matrix().matrix().clone()
             }
             _ => na::Matrix3::identity(),
         };
 
-        let r_cv_na = r_pre * r_b * r_post;
+        // Apply world-frame transform only (no camera body-frame flip — this is for
+        // generic objects, not cameras).
+        let r_cv_na = r_pre * r_b;
         let q_cv_na = na::UnitQuaternion::from_matrix(&r_cv_na);
         let q_cv = Quat::new(
             q_cv_na.coords[3],
@@ -253,29 +266,33 @@ impl ContinuousTrajectory for BezierSplineTrajectory {
     }
 
     fn linear_velocity(&self, t: f64) -> na::Vector3<f64> {
+        let t_abs = t * self.duration;
+        // BezierCurve::derivative(t_abs) gives d(value)/d(seconds) = m/s directly
         na::Vector3::new(
-            self.position_curves[0].derivative(t),
-            self.position_curves[1].derivative(t),
-            self.position_curves[2].derivative(t),
+            self.position_curves[0].derivative(t_abs),
+            self.position_curves[1].derivative(t_abs),
+            self.position_curves[2].derivative(t_abs),
         )
     }
 
     fn angular_velocity(&self, t: f64) -> Option<na::Vector3<f64>> {
+        let t_abs = t * self.duration;
         let r_pre = na::Matrix3::new(1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0);
 
         let omega_b = match self.rotation_mode {
             RotationMode::EulerXYZ => {
-                let dphi = self.rotation_curves[0].derivative(t);
-                let dtheta = self.rotation_curves[1].derivative(t);
-                let dpsi = self.rotation_curves[2].derivative(t);
+                // derivative(t_abs) gives d(angle)/d(seconds) = rad/s directly
+                let dphi = self.rotation_curves[0].derivative(t_abs);
+                let dtheta = self.rotation_curves[1].derivative(t_abs);
+                let dpsi = self.rotation_curves[2].derivative(t_abs);
 
                 let rz = na::Rotation3::from_axis_angle(
                     &na::Vector3::z_axis(),
-                    self.rotation_curves[2].evaluate(t),
+                    self.rotation_curves[2].evaluate(t_abs),
                 );
                 let ry = na::Rotation3::from_axis_angle(
                     &na::Vector3::y_axis(),
-                    self.rotation_curves[1].evaluate(t),
+                    self.rotation_curves[1].evaluate(t_abs),
                 );
 
                 let k = na::Vector3::z();
@@ -389,15 +406,17 @@ mod tests {
         let t = 0.5;
         let v_ana = trajectory.linear_velocity(t);
 
-        // Numerical derivative of position
-        let dt = 1e-6;
-        let p_plus = trajectory.pose(t + dt).translation;
-        let p_minus = trajectory.pose(t - dt).translation;
+        // Numerical derivative of position w.r.t. real time (seconds)
+        // pose takes normalized t, so dt_norm corresponds to dt_real = dt_norm * duration
+        let dt_norm = 1e-6;
+        let dt_real = dt_norm * trajectory.duration;
+        let p_plus = trajectory.pose(t + dt_norm).translation;
+        let p_minus = trajectory.pose(t - dt_norm).translation;
         let diff = p_plus - p_minus;
         let v_num = na::Vector3::new(
-            diff.x / (2.0 * dt),
-            diff.y / (2.0 * dt),
-            diff.z / (2.0 * dt),
+            diff.x / (2.0 * dt_real),
+            diff.y / (2.0 * dt_real),
+            diff.z / (2.0 * dt_real),
         );
 
         assert_abs_diff_eq!(v_ana.x, v_num.x, epsilon = 1e-6);
@@ -496,7 +515,8 @@ mod tests {
         // Compare spline samples to discrete poses
         // The discrete poses were exported at 30 FPS starting at frame 1 (t = 1/30)
         for i in 0..num_frames {
-            let t = (i + 1) as f64 / trajectory.fps;
+            let t_abs = (i + 1) as f64 / trajectory.fps;
+            let t = t_abs / trajectory.duration;
             let spline_pose = trajectory.pose(t);
             let discrete_pose = discrete_poses[i];
 
