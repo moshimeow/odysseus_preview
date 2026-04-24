@@ -438,6 +438,10 @@ impl<T: Real> Quat<T> {
         }
     }
 
+    pub fn dot(self, other: Self) -> T {
+        self.w * other.w + self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
     /// Quaternion conjugate (inverse for unit quaternions)
     pub fn conjugate(self) -> Self {
         Self {
@@ -684,6 +688,19 @@ impl Quat<f64> {
         };
 
         Self { w, x, y, z }
+    }
+}
+
+impl<T: Real> std::ops::Neg for Quat<T> {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Self {
+            w: T::zero() - self.w,
+            x: T::zero() - self.x,
+            y: T::zero() - self.y,
+            z: T::zero() - self.z,
+        }
     }
 }
 
