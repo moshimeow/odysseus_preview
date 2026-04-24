@@ -56,15 +56,16 @@ impl ImuNoiseParams {
     /// estimated safe bias random walk:
     /// gyro: 4e-6
     /// accel: 4e-4
+    /// zero rate output: 1 dps
+    /// zero g output: 40 mg
     pub fn consumer_grade() -> Self {
         Self {
             gyro_noise_density: 7e-5,
             accel_noise_density: 1e-3,
             gyro_bias_random_walk: 4e-6,
             accel_bias_random_walk: 4e-4,
-            // 1 degree per second
-            initial_gyro_bias_magnitude: std::f64::consts::PI / 180.0,
-            initial_accel_bias_magnitude: 0.0,
+            initial_gyro_bias_magnitude: 1.0 * std::f64::consts::PI / 180.0, // 1 degree per second
+            initial_accel_bias_magnitude: 40.0 * 1e-3 * 9.81, // 40 mg
         }
     }
 }
@@ -110,6 +111,17 @@ impl ImuSimulator {
         self
     }
 
+    /// wrapper for generate_from_continuous_trajectory_with_bias that returns only the measurements
+    pub fn generate_from_continuous_trajectory<T: ContinuousTrajectory>(
+        &self,
+        trajectory: &T,
+        duration: f64,
+        seed: u64,
+    ) -> Vec<ImuMeasurement>{
+        let (measurements, _, _) = self.generate_from_continuous_trajectory_with_bias(trajectory, duration, seed);
+        measurements
+    }
+
     /// Generate IMU measurements from a continuous trajectory with analytical derivatives
     ///
     /// This method uses the trajectory's analytical velocity to compute acceleration
@@ -122,18 +134,20 @@ impl ImuSimulator {
     ///
     /// # Returns
     /// Vector of IMU measurements at the configured rate
-    pub fn generate_from_continuous_trajectory<T: ContinuousTrajectory>(
+    pub fn generate_from_continuous_trajectory_with_bias<T: ContinuousTrajectory>(
         &self,
         trajectory: &T,
         duration: f64,
         seed: u64,
-    ) -> Vec<ImuMeasurement> {
+    ) -> (Vec<ImuMeasurement>, Vector3<f64>, Vector3<f64>) {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut measurements = Vec::new();
 
-        // Current bias state (random walk)
-        let mut gyro_bias = Vector3::zeros();
-        let mut accel_bias = Vector3::zeros();
+        // Current bias state (random walk), initialized to random point on sphere
+        let mut gyro_bias = random_unit_vector(&mut rng) * self.noise_params.initial_gyro_bias_magnitude;
+        let mut accel_bias = random_unit_vector(&mut rng) * self.noise_params.initial_accel_bias_magnitude;
+        let initial_gyro_bias = gyro_bias;
+        let initial_accel_bias = accel_bias;
 
         let dt = 1.0 / self.imu_rate;
 
@@ -198,7 +212,7 @@ impl ImuSimulator {
             current_time += dt;
         }
 
-        measurements
+        (measurements, initial_gyro_bias, initial_accel_bias)
     }
 
     /// Sample gyroscope measurement noise (Gaussian)
@@ -249,6 +263,17 @@ impl ImuSimulator {
                 accel_normal.sample(rng),
             );
         }
+    }
+}
+
+fn random_unit_vector<R: Rng>(rng: &mut R) -> Vector3<f64> {
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let v = Vector3::new(normal.sample(rng), normal.sample(rng), normal.sample(rng));
+    let norm = v.norm();
+    if norm < 1e-15 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        v / norm
     }
 }
 
