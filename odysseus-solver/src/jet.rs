@@ -411,6 +411,9 @@ pub trait Real:
     + Mul<Output = Self>
     + Div<Output = Self>
     + Neg<Output = Self>
+    + Add<Self::Scalar, Output = Self>
+    + Sub<Self::Scalar, Output = Self>
+    + Mul<Self::Scalar, Output = Self>
     + Sized
 {
     type Scalar: Copy + Default + PartialOrd;

@@ -105,11 +105,14 @@ impl<T: Real> Vec3<T> {
 }
 
 // Arithmetic operations for Vec3
-impl<T: Real> std::ops::Sub for Vec3<T> {
-    type Output = Self;
+impl<R, T> std::ops::Sub<Vec3<T>> for Vec3<R>
+where
+    R: Sub<T, Output = R>,
+{
+    type Output = Vec3<R>;
 
-    fn sub(self, other: Self) -> Self {
-        Self {
+    fn sub(self, other: Vec3<T>) -> Vec3<R> {
+        Vec3 {
             x: self.x - other.x,
             y: self.y - other.y,
             z: self.z - other.z,
