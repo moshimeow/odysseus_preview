@@ -17,6 +17,12 @@ pub struct Jet<T, const N: usize> {
     pub derivs: [T; N],
 }
 
+impl<T: PartialOrd, const N: usize> PartialOrd for Jet<T, N> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
 impl<T: Copy + Default, const N: usize> Default for Jet<T, N> {
     fn default() -> Self {
         Self {
@@ -406,6 +412,8 @@ impl_jet_math!(f64, 1e-16_f64);
 pub trait Real:
     Copy
     + Default
+    + PartialEq
+    + PartialOrd
     + Add<Output = Self>
     + Sub<Output = Self>
     + Mul<Output = Self>

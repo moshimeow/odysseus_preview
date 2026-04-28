@@ -581,7 +581,7 @@ impl<T: Real> Quat<T> {
         // Canonicalize to w >= 0 to stay on the principal branch (angle in [0, π]).
         // Negating a quaternion gives the same rotation but flips the sign of w,
         // so we always work with the representative that has w >= 0.
-        let sign = if self.w.scalar() < T::Scalar::default() { -T::one() } else { T::one() };
+        let sign = if self.w < T::zero() { -T::one() } else { T::one() };
         let (x, y, z, w) = (sign * self.x, sign * self.y, sign * self.z, sign * self.w);
 
         // θ = 2 * acos(w), but we need to handle the sign of w
@@ -592,7 +592,7 @@ impl<T: Real> Quat<T> {
         // half_theta = asin(|xyz|) or acos(w).
         // Clamp w above 1 to defend against FP drift on products of near-unit quats
         // (w.acos() is NaN for w > 1). Canonicalization above already guarantees w ≥ 0.
-        let w_safe = if w.scalar() > T::one().scalar() { T::one() } else { w };
+        let w_safe = if w > T::one() { T::one() } else { w };
         let half_theta = w_safe.acos();
         let theta = half_theta * T::from_literal(2.0);
         let theta_sq = theta * theta;
