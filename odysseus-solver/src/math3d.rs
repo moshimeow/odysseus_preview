@@ -210,6 +210,12 @@ impl<T: Copy> From<&[T; 3]> for Vec3<T> {
     }
 }
 
+impl<T: Copy> From<Vec3<T>> for [T; 3] {
+    fn from(v: Vec3<T>) -> Self {
+        [v.x, v.y, v.z]
+    }
+}
+
 impl<T: Copy + nalgebra::Scalar> From<Vec3<T>> for nalgebra::Vector3<T> {
     fn from(v: Vec3<T>) -> Self {
         nalgebra::Vector3::new(v.x, v.y, v.z)

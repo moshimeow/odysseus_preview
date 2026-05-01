@@ -6,6 +6,7 @@
 
 mod jet;
 pub mod math3d;
+pub mod params;
 pub mod solver;
 pub mod sparse_solver;
 
