@@ -1241,3 +1241,24 @@ mod tests {
         }
     }
 }
+
+// ============================================================================
+// Covariance utilities
+
+/// Compute the square-root information matrix from a symmetric positive-definite
+/// covariance matrix via eigendecomposition.
+///
+/// Returns `W` such that `W^T W ≈ cov^{-1}`. Eigenvalues are floored at `1e-18`
+/// before inversion to handle near-singular covariances gracefully.
+pub fn sqrt_info_from_cov<const N: usize>(
+    cov: &nalgebra::SMatrix<f64, N, N>,
+) -> nalgebra::SMatrix<f64, N, N> {
+    let dyn_cov = nalgebra::DMatrix::from_iterator(N, N, cov.iter().cloned());
+    let e = dyn_cov.symmetric_eigen();
+    let mut s = nalgebra::DMatrix::zeros(N, N);
+    for i in 0..N {
+        s[(i, i)] = 1.0 / e.eigenvalues[i].max(1e-18).sqrt();
+    }
+    let result_dyn = &e.eigenvectors * s * e.eigenvectors.transpose();
+    nalgebra::SMatrix::from_iterator(result_dyn.iter().cloned())
+}
