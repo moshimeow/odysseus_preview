@@ -125,6 +125,8 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
             accel_noise_density: ACCEL_NOISE,
             gyro_bias_random_walk: 0.0,
             accel_bias_random_walk: 0.0,
+            initial_gyro_bias_magnitude: 0.0,
+            initial_accel_bias_magnitude: 0.0,
         },
         IMU_RATE,
     );

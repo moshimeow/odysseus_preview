@@ -230,20 +230,6 @@ macro_rules! impl_jet_scalar_arithmetic {
             }
         }
 
-        // Jet * scalar
-        impl<const N: usize> Mul<$T> for Jet<$T, N> {
-            type Output = Self;
-
-            fn mul(self, rhs: $T) -> Self {
-                let result = Self {
-                    value: self.value * rhs,
-                    derivs: std::array::from_fn(|i| self.derivs[i] * rhs),
-                };
-                result.check_nan("mul(jet,scalar)");
-                result
-            }
-        }
-
         // scalar * Jet
         impl<const N: usize> Mul<Jet<$T, N>> for $T {
             type Output = Jet<$T, N>;
@@ -421,7 +407,6 @@ pub trait Real:
     + Neg<Output = Self>
     + Add<Self::Scalar, Output = Self>
     + Sub<Self::Scalar, Output = Self>
-    + Mul<Self::Scalar, Output = Self>
     + Sized
 {
     type Scalar: Copy + Default + PartialOrd;

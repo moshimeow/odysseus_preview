@@ -3,6 +3,7 @@
 use crate::math::{SE3, SO3};
 use nalgebra::Vector3;
 use odysseus_solver::math3d::Vec3;
+use odysseus_solver::{Jet, Real, real_fn};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -156,90 +157,80 @@ impl ContinuousCircularTrajectory {
         }
     }
 
-    /// Angular frequency (rad/s) around the circle
-    fn omega(&self) -> f64 {
-        2.0 * std::f64::consts::PI / self.duration
+}
+
+impl ContinuousCircularTrajectory {
+    #[real_fn]
+    fn pose_generic<T: Real<Scalar = f64>>(&self, t: T) -> SE3<T> {
+        let pi = T::from_f64(std::f64::consts::PI);
+        let radius = T::from_f64(self.radius);
+        let amplitude = T::from_f64(self.orientation_amplitude);
+        let theta = t * 2.0R * pi;
+
+        let translation = Vec3::new(
+            theta.cos() * radius,
+            theta.sin() * radius,
+            T::zero(),
+        );
+
+        let rotation = if self.look_tangent {
+            let yaw = theta + pi / 2.0R;
+            let osc_x = (theta * 2.0R).sin() * amplitude;
+            let osc_y = (theta * 2.0R + 2.0R * pi / 3.0R).sin() * amplitude;
+            let rot_yaw = SO3::exp(Vec3::new(T::zero(), T::zero(), yaw));
+            let rot_osc = SO3::exp(Vec3::new(osc_x, osc_y, T::zero()));
+            (rot_yaw * rot_osc).normalize()
+        } else if self.orientation_amplitude > 0.0 {
+            let osc_x = (theta * 2.0R).sin() * amplitude;
+            let osc_y = (theta * 2.0R + 2.0R * pi / 3.0R).sin() * amplitude;
+            let osc_z = (theta * 2.0R + 4.0R * pi / 3.0R).sin() * amplitude;
+            SO3::exp(Vec3::new(osc_x, osc_y, osc_z))
+        } else {
+            SO3::identity()
+        };
+
+        SE3::from_rotation_translation(rotation, translation)
     }
 }
 
 impl ContinuousTrajectory for ContinuousCircularTrajectory {
     fn pose(&self, t: f64) -> SE3<f64> {
-        let theta = 2.0 * std::f64::consts::PI * t;
-
-        // Position on the circle (XY plane)
-        let x = self.radius * theta.cos();
-        let y = self.radius * theta.sin();
-        let z = 0.0;
-        let translation = Vec3::new(x, y, z);
-
-        // Rotation
-        let rotation = if self.look_tangent {
-            // Look in the direction of motion (tangent to circle)
-            // Tangent direction: [-sin(θ), cos(θ), 0]
-            // We want camera's forward (-Z) to point along tangent
-            // So we rotate around Z by (θ + π/2)
-            let yaw = theta + std::f64::consts::PI / 2.0;
-
-            // Add oscillation if configured
-            let osc_x = self.orientation_amplitude * (2.0 * theta).sin();
-            let osc_y =
-                self.orientation_amplitude * (2.0 * theta + 2.0 * std::f64::consts::PI / 3.0).sin();
-
-            // Compose rotations: first yaw, then pitch/roll oscillations
-            let rot_yaw = SO3::exp(Vec3::new(0.0, 0.0, yaw));
-            let rot_osc = SO3::exp(Vec3::new(osc_x, osc_y, 0.0));
-            (rot_yaw * rot_osc).normalize() // Normalize to prevent drift in log()
-        } else {
-            // Fixed orientation (identity or with oscillation only)
-            if self.orientation_amplitude > 0.0 {
-                let osc_x = self.orientation_amplitude * (2.0 * theta).sin();
-                let osc_y = self.orientation_amplitude
-                    * (2.0 * theta + 2.0 * std::f64::consts::PI / 3.0).sin();
-                let osc_z = self.orientation_amplitude
-                    * (2.0 * theta + 4.0 * std::f64::consts::PI / 3.0).sin();
-                SO3::exp(Vec3::new(osc_x, osc_y, osc_z))
-            } else {
-                SO3::identity()
-            }
-        };
-
-        SE3::from_rotation_translation(rotation, translation)
+        self.pose_generic(t)
     }
 
     fn linear_velocity(&self, t: f64) -> Vector3<f64> {
-        let theta = 2.0 * std::f64::consts::PI * t;
-        let omega = self.omega(); // rad/s
-
-        // d/dt [R*cos(ωt), R*sin(ωt), 0] = [−Rω*sin(ωt), Rω*cos(ωt), 0]
-        // But t is normalized, so θ = 2πt and dθ/dt_real = 2π/T = ω
-        let speed = self.radius * omega;
-
-        Vector3::new(-speed * theta.sin(), speed * theta.cos(), 0.0)
+        // Differentiate translation w.r.t. normalized t, then scale to real time
+        let t_jet = Jet::<f64, 1>::variable(t, 0);
+        let pose = self.pose_generic(t_jet);
+        Vector3::new(
+            pose.translation.x.derivs[0] / self.duration,
+            pose.translation.y.derivs[0] / self.duration,
+            pose.translation.z.derivs[0] / self.duration,
+        )
     }
 
     fn angular_velocity(&self, t: f64) -> Option<Vector3<f64>> {
-        let _theta = 2.0 * std::f64::consts::PI * t;
-        let omega = self.omega();
+        // Body-frame angular velocity: ω = 2 * Im(q̄ * dq/dt_real)
+        let t_jet = Jet::<f64, 1>::variable(t, 0);
+        let pose = self.pose_generic(t_jet);
+        let q = pose.rotation.quat;
 
-        if self.look_tangent {
-            // When there's oscillation, the analytical angular velocity is complex
-            // (requires SO3 right Jacobian). Return None to use finite differences.
-            if self.orientation_amplitude > 0.0 {
-                None // Let simulator use finite differences from relative rotation
-            } else {
-                // No oscillation - just yaw around world Z.
-                // For pure Z rotation, world and body angular velocity are the same.
-                // (Z-axis is invariant under rotation about Z)
-                Some(Vector3::new(0.0, 0.0, omega))
-            }
-        } else if self.orientation_amplitude > 0.0 {
-            // Oscillation case: angular velocity from rotation vector derivatives is
-            // only exact for small angles. Return None to use finite differences.
-            None
-        } else {
-            // Fixed orientation, no angular velocity
-            Some(Vector3::zeros())
-        }
+        // Quaternion values and their derivatives w.r.t. normalized t
+        let (qw, qx, qy, qz) = (q.w.value, q.x.value, q.y.value, q.z.value);
+        // Scale by 1/duration to convert from d/dt_normalized to d/dt_real
+        let (dqw, dqx, dqy, dqz) = (
+            q.w.derivs[0] / self.duration,
+            q.x.derivs[0] / self.duration,
+            q.y.derivs[0] / self.duration,
+            q.z.derivs[0] / self.duration,
+        );
+
+        // Im(q̄ * dq) where q̄ = (qw, -qx, -qy, -qz)
+        let wx = 2.0 * (qw * dqx - dqw * qx - qy * dqz + qz * dqy);
+        let wy = 2.0 * (qw * dqy - dqw * qy - qz * dqx + qx * dqz);
+        let wz = 2.0 * (qw * dqz - dqw * qz - qx * dqy + qy * dqx);
+
+        Some(Vector3::new(wx, wy, wz))
     }
 }
 

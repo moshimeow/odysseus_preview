@@ -396,6 +396,7 @@ mod tests {
         }
 
         let trajectory = BezierSplineTrajectory {
+            start_time: 0.0,
             position_curves: [curves[0].clone(), curves[1].clone(), curves[2].clone()],
             rotation_curves: vec![curves[3].clone(), curves[4].clone(), curves[5].clone()],
             rotation_mode: RotationMode::EulerXYZ,
@@ -426,17 +427,17 @@ mod tests {
         // Angular velocity check (Euler XYZ)
         if let Some(omega_ana) = trajectory.angular_velocity(t) {
             // Numerical derivative of rotation
-            let q_plus = trajectory.pose(t + dt).rotation.quat;
-            let q_minus = trajectory.pose(t - dt).rotation.quat;
+            let q_plus = trajectory.pose(t + dt_norm).rotation.quat;
+            let q_minus = trajectory.pose(t - dt_norm).rotation.quat;
             // omega = 2 * (q_dot * q_inv)
             // Simplified for small dt: 2 * (q(t+dt) - q(t-dt))/(2*dt) * q(t)^inv
             let q_t = trajectory.pose(t).rotation.quat;
 
             // q_dot approx
-            let qw_dot = (q_plus.w - q_minus.w) / (2.0 * dt);
-            let qx_dot = (q_plus.x - q_minus.x) / (2.0 * dt);
-            let qy_dot = (q_plus.y - q_minus.y) / (2.0 * dt);
-            let qz_dot = (q_plus.z - q_minus.z) / (2.0 * dt);
+            let qw_dot = (q_plus.w - q_minus.w) / (2.0 * dt_real);
+            let qx_dot = (q_plus.x - q_minus.x) / (2.0 * dt_real);
+            let qy_dot = (q_plus.y - q_minus.y) / (2.0 * dt_real);
+            let qz_dot = (q_plus.z - q_minus.z) / (2.0 * dt_real);
 
             // q_dot * conj(q_t)
             let res_x = qw_dot * (-q_t.x) + qx_dot * q_t.w + qy_dot * (-q_t.z) - qz_dot * (-q_t.y);
