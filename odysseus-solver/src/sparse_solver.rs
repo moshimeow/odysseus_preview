@@ -54,6 +54,9 @@ pub struct SparseLevenbergMarquardt<T> {
     jtr: DVector<T>,            // J^T * r (dense, always full)
     residuals: DVector<T>,      // Dense residual vector
     temp_residuals: DVector<T>, // For trial step evaluation
+
+    // Diagonal of J^T J at the last solver iteration (before damping)
+    last_jtj_diagonal: DVector<T>,
 }
 
 impl<T> SparseLevenbergMarquardt<T>
@@ -83,6 +86,8 @@ where
         let residuals = DVector::zeros(n_rows);
         let temp_residuals = DVector::zeros(n_rows);
 
+        let last_jtj_diagonal = DVector::zeros(n_cols);
+
         Self {
             tolerance: T::from(1e-10).unwrap(),
             max_iterations: 50,
@@ -94,6 +99,7 @@ where
             jtr,
             residuals,
             temp_residuals,
+            last_jtj_diagonal,
         }
     }
 
@@ -175,6 +181,12 @@ where
             }
 
             let gradient_norm = self.jtr.norm();
+
+            // Snapshot the undamped diagonal of J^T J
+            let n_cols = params.len();
+            for i in 0..n_cols {
+                self.last_jtj_diagonal[i] = jtj.get(i, i).cloned().unwrap_or(T::zero());
+            }
 
             // Add damping: JtJ[i,i] += lambda * max(JtJ[i,i], 1.0)
             let jtj_damped = add_damping(&jtj, lambda);
@@ -273,6 +285,13 @@ where
         }
 
         params
+    }
+
+    /// Returns the diagonal of J^T J from the last solver iteration (before damping).
+    /// Each entry is the sum of squared Jacobian column entries, measuring how strongly
+    /// the corresponding parameter is constrained by the observations.
+    pub fn last_jtj_diagonal(&self) -> &DVector<T> {
+        &self.last_jtj_diagonal
     }
 }
 

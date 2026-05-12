@@ -51,6 +51,9 @@ pub struct LevenbergMarquardt<T, const N_PARAMS: usize, const N_RESIDUALS: usize
     // Additional workspace for trial step evaluation
     workspace_temp_residuals: Box<SVector<T, N_RESIDUALS>>,
     workspace_temp_jacobian: Box<SMatrix<T, N_RESIDUALS, N_PARAMS>>,
+
+    // Diagonal of J^T J at the last accepted iteration (before damping)
+    last_jtj_diagonal: Box<SVector<T, N_PARAMS>>,
 }
 
 /// Result of one optimization iteration
@@ -108,6 +111,9 @@ macro_rules! impl_levenberg_marquardt {
                         Box::new_zeroed().assume_init()
                     },
                     workspace_temp_jacobian: unsafe {
+                        Box::new_zeroed().assume_init()
+                    },
+                    last_jtj_diagonal: unsafe {
                         Box::new_zeroed().assume_init()
                     },
                 }
@@ -218,6 +224,11 @@ macro_rules! impl_levenberg_marquardt {
 
                     let gradient_norm = self.workspace_jtr.norm();
 
+                    // Snapshot the undamped diagonal before modifying workspace_jtj
+                    for i in 0..N_PARAMS {
+                        self.last_jtj_diagonal[i] = self.workspace_jtj[(i, i)];
+                    }
+
                     // Add damping (Levenberg-Marquardt)
                     for i in 0..N_PARAMS {
                         self.workspace_jtj[(i, i)] += lambda * self.workspace_jtj[(i, i)].max(1.0 as $T);
@@ -327,6 +338,13 @@ macro_rules! impl_levenberg_marquardt {
                 };
 
                 self.solve(params, cost_fn_wrapped, |_iter, _result, _params| {})
+            }
+
+            /// Returns the diagonal of J^T J from the last solver iteration (before damping).
+            /// Each entry is the sum of squared Jacobian column entries, measuring how strongly
+            /// the corresponding parameter is constrained by the observations.
+            pub fn last_jtj_diagonal(&self) -> &SVector<$T, N_PARAMS> {
+                &self.last_jtj_diagonal
             }
         }
 
