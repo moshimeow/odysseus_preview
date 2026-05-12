@@ -153,12 +153,28 @@ impl BezierSplineTrajectory {
             let num_keys = read_u32(&mut file);
             let mut keyframes = Vec::new();
             for _ in 0..num_keys {
-                keyframes.push(BezierKeyframe {
+                let kf = BezierKeyframe {
                     time: read_f64(&mut file),
                     value: read_f64(&mut file),
                     handle_left: (read_f64(&mut file), read_f64(&mut file)),
                     handle_right: (read_f64(&mut file), read_f64(&mut file)),
-                });
+                };
+                // Blender keyframes can modify only a subset of channels (e.g. a
+                // rotation-only keyframe at frame 197). The exporter emits one
+                // keyframe per channel for the union of all keyframe times, and
+                // for channels without a real keyframe at that time it writes a
+                // synthetic keyframe with both handles collapsed to (time, value).
+                // That collapse makes p1==p0 and p2==p3 in the cubic Bezier,
+                // pinning the derivative to zero and producing a brief "pause"
+                // in the channel — visible as a bump in dead-reckoned IMU and as
+                // a delta-function spike in derived acceleration. Skip these.
+                let is_synthetic = kf.handle_left.0 == kf.time
+                    && kf.handle_right.0 == kf.time
+                    && kf.handle_left.1 == kf.value
+                    && kf.handle_right.1 == kf.value;
+                if !is_synthetic {
+                    keyframes.push(kf);
+                }
             }
             channels.push(BezierCurve { keyframes });
         }
@@ -170,16 +186,17 @@ impl BezierSplineTrajectory {
         ];
         let rot_channels = channels[3..].to_vec();
 
-        let start_time = pos_channels[0]
-            .keyframes
-            .first()
-            .map(|k| k.time)
-            .unwrap_or(0.0);
-        let duration = pos_channels[0]
-            .keyframes
-            .last()
-            .map(|k| k.time)
-            .unwrap_or(0.0);
+        // Start/end of the trajectory is the union across all channels, not the
+        // X-position channel alone, since dropping synthetics may have removed a
+        // channel's boundary keyframe.
+        let start_time = channels
+            .iter()
+            .filter_map(|c| c.keyframes.first().map(|k| k.time))
+            .fold(f64::INFINITY, f64::min);
+        let duration = channels
+            .iter()
+            .filter_map(|c| c.keyframes.last().map(|k| k.time))
+            .fold(f64::NEG_INFINITY, f64::max);
 
         Ok(Self {
             position_curves: pos_channels,
@@ -277,18 +294,19 @@ impl ContinuousTrajectory for BezierSplineTrajectory {
 
     fn angular_velocity(&self, t: f64) -> Option<na::Vector3<f64>> {
         let t_abs = t * self.duration;
-        let r_pre = na::Matrix3::new(1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0);
 
-        let omega_b = match self.rotation_mode {
+        match self.rotation_mode {
             RotationMode::EulerXYZ => {
-                // derivative(t_abs) gives d(angle)/d(seconds) = rad/s directly
+                // R_b = Rz(psi) * Ry(theta) * Rx(phi)
+                // Body-frame: ω_body = x·dphi + Rx^T·y·dtheta + Rx^T·Ry^T·z·dpsi
+                // (r_pre is constant so it cancels in R^T·dR/dt)
                 let dphi = self.rotation_curves[0].derivative(t_abs);
                 let dtheta = self.rotation_curves[1].derivative(t_abs);
                 let dpsi = self.rotation_curves[2].derivative(t_abs);
 
-                let rz = na::Rotation3::from_axis_angle(
-                    &na::Vector3::z_axis(),
-                    self.rotation_curves[2].evaluate(t_abs),
+                let rx = na::Rotation3::from_axis_angle(
+                    &na::Vector3::x_axis(),
+                    self.rotation_curves[0].evaluate(t_abs),
                 );
                 let ry = na::Rotation3::from_axis_angle(
                     &na::Vector3::y_axis(),
@@ -299,14 +317,10 @@ impl ContinuousTrajectory for BezierSplineTrajectory {
                 let j = na::Vector3::y();
                 let i = na::Vector3::x();
 
-                let omega = k * dpsi + rz * j * dtheta + (rz * ry) * i * dphi;
-                omega
+                Some(i * dphi + rx.transpose() * j * dtheta + rx.transpose() * ry.transpose() * k * dpsi)
             }
-            _ => return None,
-        };
-
-        let omega_cv_na = r_pre * omega_b;
-        Some(omega_cv_na)
+            _ => None,
+        }
     }
 }
 
@@ -424,25 +438,21 @@ mod tests {
         assert_abs_diff_eq!(v_ana.y, v_num.y, epsilon = 1e-6);
         assert_abs_diff_eq!(v_ana.z, v_num.z, epsilon = 1e-6);
 
-        // Angular velocity check (Euler XYZ)
+        // Angular velocity check (Euler XYZ) — body frame: ω = 2·Im(conj(q)·q_dot)
         if let Some(omega_ana) = trajectory.angular_velocity(t) {
-            // Numerical derivative of rotation
             let q_plus = trajectory.pose(t + dt_norm).rotation.quat;
             let q_minus = trajectory.pose(t - dt_norm).rotation.quat;
-            // omega = 2 * (q_dot * q_inv)
-            // Simplified for small dt: 2 * (q(t+dt) - q(t-dt))/(2*dt) * q(t)^inv
             let q_t = trajectory.pose(t).rotation.quat;
 
-            // q_dot approx
             let qw_dot = (q_plus.w - q_minus.w) / (2.0 * dt_real);
             let qx_dot = (q_plus.x - q_minus.x) / (2.0 * dt_real);
             let qy_dot = (q_plus.y - q_minus.y) / (2.0 * dt_real);
             let qz_dot = (q_plus.z - q_minus.z) / (2.0 * dt_real);
 
-            // q_dot * conj(q_t)
-            let res_x = qw_dot * (-q_t.x) + qx_dot * q_t.w + qy_dot * (-q_t.z) - qz_dot * (-q_t.y);
-            let res_y = qw_dot * (-q_t.y) - qx_dot * (-q_t.z) + qy_dot * q_t.w + qz_dot * (-q_t.x);
-            let res_z = qw_dot * (-q_t.z) + qx_dot * (-q_t.y) - qy_dot * (-q_t.x) + qz_dot * q_t.w;
+            // conj(q_t) * q_dot  (body-frame formula)
+            let res_x = q_t.w * qx_dot - q_t.x * qw_dot - q_t.y * qz_dot + q_t.z * qy_dot;
+            let res_y = q_t.w * qy_dot + q_t.x * qz_dot - q_t.y * qw_dot - q_t.z * qx_dot;
+            let res_z = q_t.w * qz_dot - q_t.x * qy_dot + q_t.y * qx_dot - q_t.z * qw_dot;
 
             let omega_num = na::Vector3::new(2.0 * res_x, 2.0 * res_y, 2.0 * res_z);
 
