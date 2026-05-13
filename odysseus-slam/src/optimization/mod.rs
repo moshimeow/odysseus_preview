@@ -163,7 +163,7 @@ pub fn stereo_reprojection_residual_host_relative<T: Real>(
 
 /// Apply Huber loss to a single residual and its Jacobian row
 #[inline]
-pub(crate) fn apply_huber_loss(huber_delta: f64, residual: &mut f64, jacobian_row: &mut [f64]) {
+pub fn apply_huber_loss(huber_delta: f64, residual: &mut f64, jacobian_row: &mut [f64]) {
     let abs_r = residual.abs();
     if abs_r > huber_delta {
         let weight = (huber_delta / abs_r).sqrt();
