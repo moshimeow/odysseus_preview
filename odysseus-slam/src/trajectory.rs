@@ -120,6 +120,8 @@ pub struct ContinuousCircularTrajectory {
     pub orientation_amplitude: f64,
     /// Whether the camera looks tangent to the path (vs fixed orientation)
     pub look_tangent: bool,
+    /// Amplitude of vertical (Z-axis) sinusoidal oscillation in meters (0 for flat circle)
+    pub vertical_oscillation_amplitude: f64,
 }
 
 impl ContinuousCircularTrajectory {
@@ -132,6 +134,7 @@ impl ContinuousCircularTrajectory {
             duration,
             orientation_amplitude: 0.0,
             look_tangent: true,
+            vertical_oscillation_amplitude: 0.0,
         }
     }
 
@@ -144,6 +147,7 @@ impl ContinuousCircularTrajectory {
             duration,
             orientation_amplitude: amplitude,
             look_tangent: true,
+            vertical_oscillation_amplitude: 0.0,
         }
     }
 
@@ -154,7 +158,14 @@ impl ContinuousCircularTrajectory {
             duration,
             orientation_amplitude: 0.0,
             look_tangent: false,
+            vertical_oscillation_amplitude: 0.0,
         }
+    }
+
+    /// Add vertical (Z-axis) sinusoidal oscillation: z(t) = A * sin(2πt)
+    pub fn with_vertical_oscillation(mut self, amplitude: f64) -> Self {
+        self.vertical_oscillation_amplitude = amplitude;
+        self
     }
 
 }
@@ -167,10 +178,11 @@ impl ContinuousCircularTrajectory {
         let amplitude = T::from_f64(self.orientation_amplitude);
         let theta = t * 2.0R * pi;
 
+        let vert_amp = T::from_f64(self.vertical_oscillation_amplitude);
         let translation = Vec3::new(
             theta.cos() * radius,
             theta.sin() * radius,
-            T::zero(),
+            (theta * 4.0R).sin() * vert_amp,
         );
 
         let rotation = if self.look_tangent {
