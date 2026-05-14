@@ -71,11 +71,11 @@ impl<T: Real> SE3Tangent<T> {
         let cos_theta = theta.cos();
 
         // Taylor series for small angles
-        let taylor_b = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 24.0);
-        let taylor_c = T::from_literal(1.0 / 6.0) - theta_sq * T::from_literal(1.0 / 120.0);
+        let taylor_b = T::from_f64(0.5) - theta_sq * T::from_f64(1.0 / 24.0);
+        let taylor_c = T::from_f64(1.0 / 6.0) - theta_sq * T::from_f64(1.0 / 120.0);
 
         // Exact formulas with safe division
-        let eps_sq = T::from_literal(1e-20);
+        let eps_sq = T::from_f64(1e-20);
         let theta_sq_safe = theta_sq + eps_sq;
         let theta_cubed_safe = theta_sq_safe * (theta_sq + eps_sq).sqrt();
 
@@ -83,7 +83,7 @@ impl<T: Real> SE3Tangent<T> {
         let exact_c = (theta - sin_theta) / theta_cubed_safe;
 
         // Blend between Taylor and exact
-        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
+        let blend = theta_sq / (theta_sq + T::from_f64(0.001));
         let b = taylor_b * (T::one() - blend) + exact_b * blend;
         let c = taylor_c * (T::one() - blend) + exact_c * blend;
 
@@ -198,22 +198,22 @@ impl<T: Real> SE3<T> {
         let cos_theta = theta.cos();
 
         // Taylor series for small angles
-        let taylor_b = T::from_literal(-0.5) + theta_sq * T::from_literal(1.0 / 24.0);
-        let taylor_c = T::from_literal(1.0 / 12.0) - theta_sq * T::from_literal(1.0 / 720.0);
+        let taylor_b = T::from_f64(-0.5) + theta_sq * T::from_f64(1.0 / 24.0);
+        let taylor_c = T::from_f64(1.0 / 12.0) - theta_sq * T::from_f64(1.0 / 720.0);
 
         // Exact formulas
-        let eps = T::from_literal(1e-10);
-        let eps_sq = T::from_literal(1e-20);
+        let eps = T::from_f64(1e-10);
+        let eps_sq = T::from_f64(1e-20);
         let theta_safe = theta + eps;
         let theta_sq_safe = theta_sq + eps_sq;
         let sin_theta_safe = sin_theta + eps;
 
-        let exact_b = T::from_literal(-0.5);
+        let exact_b = T::from_f64(-0.5);
         let exact_c = T::one() / theta_sq_safe
-            - (T::one() + cos_theta) / (T::from_literal(2.0) * theta_safe * sin_theta_safe);
+            - (T::one() + cos_theta) / (T::from_f64(2.0) * theta_safe * sin_theta_safe);
 
         // Blend
-        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
+        let blend = theta_sq / (theta_sq + T::from_f64(0.001));
         let b = taylor_b * (T::one() - blend) + exact_b * blend;
         let c = taylor_c * (T::one() - blend) + exact_c * blend;
 

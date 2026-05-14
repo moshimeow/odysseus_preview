@@ -71,7 +71,7 @@ fn main() {
 /// Evaluate parabola: y = ax² + bx + c
 /// Works with both f64 and Jet thanks to Real trait
 fn parabola<T: Real>(x: f64, a: T, b: T, c: T) -> T {
-    let x_t = T::from_literal(x);
+    let x_t = T::from_f64(x);
     a * x_t * x_t + b * x_t + c
 }
 

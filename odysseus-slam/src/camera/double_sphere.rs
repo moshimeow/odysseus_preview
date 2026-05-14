@@ -68,7 +68,7 @@ where
         let r2 = mx * mx + my * my;
 
         // mz = (1 - α² r²) / (α sqrt(1 - (2α - 1) r²) + 1 - α)
-        let two = T::from_literal(2.0);
+        let two = T::from_f64(2.0);
         let alpha_sq = self.alpha * self.alpha;
         let inner = T::one() - (two * self.alpha - T::one()) * r2;
         let mz_num = T::one() - alpha_sq * r2;

@@ -62,9 +62,9 @@ where
         let t2 = theta * theta;
         let t3 = t2 * theta;
         self.k1
-            + T::from_literal(2.0) * self.k2 * theta
-            + T::from_literal(3.0) * self.k3 * t2
-            + T::from_literal(4.0) * self.k4 * t3
+            + T::from_f64(2.0) * self.k2 * theta
+            + T::from_f64(3.0) * self.k3 * t2
+            + T::from_f64(4.0) * self.k4 * t3
     }
 
     /// Project a 3D point in camera coordinates to 2D image coordinates.

@@ -97,8 +97,8 @@ pub fn unproject_jet<T, const N: usize>(proj: [T; 2]) -> [T; 3]
 where
     T: odysseus_solver::Real,
 {
-    let two = T::from_literal(2.0);
-    let one = T::from_literal(1.0);
+    let two = T::from_f64(2.0);
+    let one = T::from_f64(1.0);
     
     let u = proj[0];
     let v = proj[1];

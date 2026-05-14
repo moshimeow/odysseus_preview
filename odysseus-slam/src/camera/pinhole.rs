@@ -63,8 +63,8 @@ impl<T: Real> PinholeCamera<T> {
 
     /// Create a simple camera with square pixels
     pub fn simple(focal_length: T, image_width: T, image_height: T) -> Self {
-        let cx = image_width * T::from_literal(0.5);
-        let cy = image_height * T::from_literal(0.5);
+        let cx = image_width * T::from_f64(0.5);
+        let cy = image_height * T::from_f64(0.5);
         Self::new(focal_length, focal_length, cx, cy)
     }
 }

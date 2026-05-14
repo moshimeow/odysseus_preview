@@ -10,7 +10,7 @@ pub mod params;
 pub mod solver;
 pub mod sparse_solver;
 
-pub use jet::{Jet, Real};
+pub use jet::{split_jets, Jet, Real};
 pub use odysseus_solver_macros::real_fn;
 pub use solver::LevenbergMarquardt;
 pub use sparse_solver::{SparseLevenbergMarquardt, build_slam_entries};

@@ -52,6 +52,21 @@ impl<T: Copy + Default, const N: usize> Jet<T, N> {
     }
 }
 
+/// Split an array of M Jets into a value vector (M×1) and Jacobian matrix (M×N).
+///
+/// Each Jet contributes its `.value` to the output vector and its `.derivs` row
+/// to the corresponding row of the Jacobian.
+pub fn split_jets<T, const M: usize, const N: usize>(
+    jets: [Jet<T, N>; M],
+) -> (nalgebra::SVector<T, M>, nalgebra::SMatrix<T, M, N>)
+where
+    T: nalgebra::Scalar + Copy,
+{
+    let values = nalgebra::SVector::<T, M>::from_fn(|r, _| jets[r].value);
+    let jac = nalgebra::SMatrix::<T, M, N>::from_fn(|r, c| jets[r].derivs[c]);
+    (values, jac)
+}
+
 // Macro to avoid code duplication for f32 and f64
 macro_rules! impl_jet_nan_check {
     ($T:ty) => {
@@ -421,6 +436,8 @@ pub trait Real:
     + Neg<Output = Self>
     + Add<Self::Scalar, Output = Self>
     + Sub<Self::Scalar, Output = Self>
+    + Mul<Self::Scalar, Output = Self>
+    + Div<Self::Scalar, Output = Self>
     + Sized
 {
     type Scalar: Copy + Default + PartialOrd;
@@ -434,10 +451,8 @@ pub trait Real:
     fn exp(self) -> Self;
     fn ln(self) -> Self;
 
-    fn constant(value: Self::Scalar) -> Self; //
-    fn from_literal(value: f64) -> Self;  // Convert f64 to Self (works for literals and variables)
+    fn constant(value: Self::Scalar) -> Self;
     fn from_f64(value: f64) -> Self;
-    fn from_f32(value: f32) -> Self;
 
     fn zero() -> Self;
     fn one() -> Self;
@@ -446,111 +461,53 @@ pub trait Real:
     fn scalar(&self) -> Self::Scalar;
 }
 
-/// Real implementation for f64 (no autodiff)
-impl Real for f64 {
-    type Scalar = f64;
-
-    fn sin(self) -> Self {
-        f64::sin(self)
-    }
-    fn cos(self) -> Self {
-        f64::cos(self)
-    }
-    fn sqrt(self) -> Self {
-        f64::sqrt(self)
-    }
-    fn abs(self) -> Self {
-        f64::abs(self)
-    }
-    fn powi(self, n: i32) -> Self {
-        f64::powi(self, n)
-    }
-    fn acos(self) -> Self {
-        f64::acos(self)
-    }
-    fn exp(self) -> Self {
-        f64::exp(self)
-    }
-    fn ln(self) -> Self {
-        f64::ln(self)
-    }
-    fn constant(value: f64) -> Self {
-        value
-    }
-    fn from_literal(value: f64) -> Self {
-        value
-    }
-    fn from_f64(value: f64) -> Self {
-        value
-    }
-    fn from_f32(value: f32) -> Self {
-        value as f64
-    }
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn scalar(&self) -> Self::Scalar {
-        *self
-    }
-}
-
-/// Real implementation for f32 (no autodiff)
-impl Real for f32 {
-    type Scalar = f32;
-
-    fn sin(self) -> Self {
-        f32::sin(self)
-    }
-    fn cos(self) -> Self {
-        f32::cos(self)
-    }
-    fn sqrt(self) -> Self {
-        f32::sqrt(self)
-    }
-    fn abs(self) -> Self {
-        f32::abs(self)
-    }
-    fn powi(self, n: i32) -> Self {
-        f32::powi(self, n)
-    }
-    fn acos(self) -> Self {
-        f32::acos(self)
-    }
-    fn exp(self) -> Self {
-        f32::exp(self)
-    }
-    fn ln(self) -> Self {
-        f32::ln(self)
-    }
-    fn constant(value: f32) -> Self {
-        value
-    }
-    fn from_literal(value: f64) -> Self {
-        value as f32
-    }
-    fn from_f64(value: f64) -> Self {
-        value as f32
-    }
-    fn from_f32(value: f32) -> Self {
-        value
-    }
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn scalar(&self) -> Self::Scalar {
-        *self
-    }
-}
-
-/// Real implementation for Jet - specialized for f32 and f64
-macro_rules! impl_real_for_jet {
+/// Real implementations for a float type and its Jet wrapper
+macro_rules! impl_real {
     ($T:ty) => {
+        impl Real for $T {
+            type Scalar = $T;
+
+            fn sin(self) -> Self {
+                <$T>::sin(self)
+            }
+            fn cos(self) -> Self {
+                <$T>::cos(self)
+            }
+            fn sqrt(self) -> Self {
+                <$T>::sqrt(self)
+            }
+            fn abs(self) -> Self {
+                <$T>::abs(self)
+            }
+            fn powi(self, n: i32) -> Self {
+                <$T>::powi(self, n)
+            }
+            fn acos(self) -> Self {
+                <$T>::acos(self)
+            }
+            fn exp(self) -> Self {
+                <$T>::exp(self)
+            }
+            fn ln(self) -> Self {
+                <$T>::ln(self)
+            }
+            fn constant(value: $T) -> Self {
+                value
+            }
+            fn from_f64(value: f64) -> Self {
+                value as $T
+            }
+            fn zero() -> Self {
+                0.0
+            }
+            fn one() -> Self {
+                1.0
+            }
+            fn scalar(&self) -> Self::Scalar {
+                *self
+            }
+        }
+
         impl<const N: usize> Real for Jet<$T, N> {
             type Scalar = $T;
 
@@ -581,13 +538,7 @@ macro_rules! impl_real_for_jet {
             fn constant(value: $T) -> Self {
                 Jet::constant(value)
             }
-            fn from_literal(value: f64) -> Self {
-                Jet::constant(value as $T)
-            }
             fn from_f64(value: f64) -> Self {
-                Jet::constant(value as $T)
-            }
-            fn from_f32(value: f32) -> Self {
                 Jet::constant(value as $T)
             }
             fn zero() -> Self {
@@ -603,8 +554,8 @@ macro_rules! impl_real_for_jet {
     };
 }
 
-impl_real_for_jet!(f32);
-impl_real_for_jet!(f64);
+impl_real!(f32);
+impl_real!(f64);
 
 // ============================================================================
 // Tests
@@ -658,7 +609,7 @@ mod tests {
     fn test_generic_function() {
         // Generic function that works with both f64 and Jet
         fn quadratic<T: Real>(x: T) -> T {
-            x * x + x + T::from_literal(1.0)
+            x * x + x + T::from_f64(1.0)
         }
 
         // Test with f64

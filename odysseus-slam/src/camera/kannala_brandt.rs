@@ -56,10 +56,10 @@ where
         let theta8 = theta6 * theta2;
 
         T::one()
-            + T::from_literal(3.0) * self.k1 * theta2
-            + T::from_literal(5.0) * self.k2 * theta4
-            + T::from_literal(7.0) * self.k3 * theta6
-            + T::from_literal(9.0) * self.k4 * theta8
+            + T::from_f64(3.0) * self.k1 * theta2
+            + T::from_f64(5.0) * self.k2 * theta4
+            + T::from_f64(7.0) * self.k3 * theta6
+            + T::from_f64(9.0) * self.k4 * theta8
     }
 
     pub fn project(&self, point_cam: Vec3<T>) -> (T, T) {

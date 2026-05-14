@@ -11,7 +11,7 @@ use image::GrayImage;
 
 use crate::{
     lk_tracker::{LKConfig, LKTracker},
-    BriefDescriptor, BriefExtractor, FastDetector, KeyPoint, StereoCamera, StereoMatch, StereoMatcher,
+    BriefDescriptor, BriefExtractor, FastDetector, KeyPoint, StereoCamera, StereoMatch,
 };
 
 /// A tracked feature with persistent ID
@@ -85,8 +85,6 @@ pub struct Tracker {
     detector: FastDetector,
     /// Descriptor extractor
     extractor: BriefExtractor,
-    /// Stereo matcher
-    stereo_matcher: StereoMatcher,
     /// Previous left image (for LK tracking)
     prev_left: Option<GrayImage>,
     /// Previous right image (for temporal tracking)
@@ -118,7 +116,6 @@ impl Tracker {
             frame_idx: 0,
             detector,
             extractor: BriefExtractor::new(),
-            stereo_matcher: StereoMatcher::default(),
             prev_left: None,
             prev_right: None,
             feature_depths: HashMap::new(),

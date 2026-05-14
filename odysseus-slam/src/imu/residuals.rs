@@ -62,19 +62,19 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     // Build rotations: R = R_host * exp(delta)
     let q_delta_i = Quat::from_axis_angle(rot_delta_i);
     let q_host_i = Quat::new(
-        T::from_literal(rotation_host_i.w),
-        T::from_literal(rotation_host_i.x),
-        T::from_literal(rotation_host_i.y),
-        T::from_literal(rotation_host_i.z),
+        T::from_f64(rotation_host_i.w),
+        T::from_f64(rotation_host_i.x),
+        T::from_f64(rotation_host_i.y),
+        T::from_f64(rotation_host_i.z),
     );
     let r_i = q_host_i * q_delta_i;
 
     let q_delta_j = Quat::from_axis_angle(rot_delta_j);
     let q_host_j = Quat::new(
-        T::from_literal(rotation_host_j.w),
-        T::from_literal(rotation_host_j.x),
-        T::from_literal(rotation_host_j.y),
-        T::from_literal(rotation_host_j.z),
+        T::from_f64(rotation_host_j.w),
+        T::from_f64(rotation_host_j.x),
+        T::from_f64(rotation_host_j.y),
+        T::from_f64(rotation_host_j.z),
     );
     let r_j = q_host_j * q_delta_j;
 
@@ -86,7 +86,7 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     let delta_r_quat = rotation_vector_to_quat::<T>(&delta_r_corrected);
 
     // Time interval
-    let dt = T::from_literal(preint.delta_time);
+    let dt = T::from_f64(preint.delta_time);
     let dt_sq = dt * dt;
 
     // Gravity vector
@@ -109,14 +109,14 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     );
     let vel_in_i = r_i_inv.rotate_vec(vel_diff);
     let vel_residual = Vec3::new(
-        vel_in_i.x - T::from_literal(delta_v_corrected.x),
-        vel_in_i.y - T::from_literal(delta_v_corrected.y),
-        vel_in_i.z - T::from_literal(delta_v_corrected.z),
+        vel_in_i.x - T::from_f64(delta_v_corrected.x),
+        vel_in_i.y - T::from_f64(delta_v_corrected.y),
+        vel_in_i.z - T::from_f64(delta_v_corrected.z),
     );
 
     // === Position Residual ===
     // r_p = R_i^T * (p_j - p_i - v_i*Δt - 0.5*g*Δt²) - Δp_corrected
-    let half = T::from_literal(0.5);
+    let half = T::from_f64(0.5);
     let pos_diff = Vec3::new(
         trans_j.x - trans_i.x - vel_i.x * dt - half * g.x * dt_sq,
         trans_j.y - trans_i.y - vel_i.y * dt - half * g.y * dt_sq,
@@ -124,9 +124,9 @@ pub fn imu_preintegration_residual<T: Real<Scalar = f64>>(
     );
     let pos_in_i = r_i_inv.rotate_vec(pos_diff);
     let pos_residual = Vec3::new(
-        pos_in_i.x - T::from_literal(delta_p_corrected.x),
-        pos_in_i.y - T::from_literal(delta_p_corrected.y),
-        pos_in_i.z - T::from_literal(delta_p_corrected.z),
+        pos_in_i.x - T::from_f64(delta_p_corrected.x),
+        pos_in_i.y - T::from_f64(delta_p_corrected.y),
+        pos_in_i.z - T::from_f64(delta_p_corrected.z),
     );
 
     [
@@ -169,8 +169,8 @@ pub fn bias_residual<T: Real>(
     // Covariance = sigma² * dt
     // Weight = 1 / sqrt(covariance) = 1 / (sigma * sqrt(dt))
     let dt_sqrt = dt.sqrt();
-    let gyro_weight = T::from_literal(1.0 / gyro_bias_sigma) / dt_sqrt;
-    let accel_weight = T::from_literal(1.0 / accel_bias_sigma) / dt_sqrt;
+    let gyro_weight = T::from_f64(1.0 / gyro_bias_sigma) / dt_sqrt;
+    let accel_weight = T::from_f64(1.0 / accel_bias_sigma) / dt_sqrt;
 
     [
         (gyro_bias_j[0] - gyro_bias_i[0]) * gyro_weight,
@@ -191,9 +191,9 @@ fn rotation_vector_to_quat<T: Real>(rvec: &Vector3<f64>) -> Quat<T> {
         // Small angle: q ≈ [1, rvec/2]
         Quat::new(
             T::one(),
-            T::from_literal(rvec.x * 0.5),
-            T::from_literal(rvec.y * 0.5),
-            T::from_literal(rvec.z * 0.5),
+            T::from_f64(rvec.x * 0.5),
+            T::from_f64(rvec.y * 0.5),
+            T::from_f64(rvec.z * 0.5),
         )
     } else {
         let half_theta = theta * 0.5;
@@ -202,10 +202,10 @@ fn rotation_vector_to_quat<T: Real>(rvec: &Vector3<f64>) -> Quat<T> {
         let scale = sin_half / theta;
 
         Quat::new(
-            T::from_literal(cos_half),
-            T::from_literal(rvec.x * scale),
-            T::from_literal(rvec.y * scale),
-            T::from_literal(rvec.z * scale),
+            T::from_f64(cos_half),
+            T::from_f64(rvec.x * scale),
+            T::from_f64(rvec.y * scale),
+            T::from_f64(rvec.z * scale),
         )
     }
 }

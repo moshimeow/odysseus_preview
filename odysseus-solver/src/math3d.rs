@@ -391,6 +391,19 @@ impl<T: Real> Mat3<T> {
     }
 }
 
+impl Mat3<f64> {
+    /// Multiply a constant (f64) matrix by a Vec3 of any Real type whose Scalar
+    /// is f64. Lets autodiff call sites avoid an explicit `.to_constant::<T>()`
+    /// before `.mul_vec(...)`.
+    pub fn mul_vec_t<T: Real<Scalar = f64>>(self, v: Vec3<T>) -> Vec3<T> {
+        Vec3 {
+            x: v.x * self.x_axis.x + v.y * self.y_axis.x + v.z * self.z_axis.x,
+            y: v.x * self.x_axis.y + v.y * self.y_axis.y + v.z * self.z_axis.y,
+            z: v.x * self.x_axis.z + v.y * self.y_axis.z + v.z * self.z_axis.z,
+        }
+    }
+}
+
 impl<T: Copy> std::ops::Index<(usize, usize)> for Mat3<T> {
     type Output = T;
     fn index(&self, (row, col): (usize, usize)) -> &T {
@@ -567,9 +580,9 @@ impl<T: Real> Quat<T> {
         R: Sub<Output = R> + Add<Output = R> + Copy,
     {
         // t = 2 * (q_xyz × v)
-        let tx = T::from_literal(2.0) * (self.y * v.z - self.z * v.y);
-        let ty = T::from_literal(2.0) * (self.z * v.x - self.x * v.z);
-        let tz = T::from_literal(2.0) * (self.x * v.y - self.y * v.x);
+        let tx = T::from_f64(2.0) * (self.y * v.z - self.z * v.y);
+        let ty = T::from_f64(2.0) * (self.z * v.x - self.x * v.z);
+        let tz = T::from_f64(2.0) * (self.x * v.y - self.y * v.x);
 
         // v' = v + w*t + (q_xyz × t)
         Vec3 {
@@ -598,21 +611,21 @@ impl<T: Real> Quat<T> {
     pub fn from_axis_angle(rvec: Vec3<T>) -> Self {
         let theta_sq = rvec.x * rvec.x + rvec.y * rvec.y + rvec.z * rvec.z;
         let theta = theta_sq.sqrt();
-        let half_theta = theta * T::from_literal(0.5);
+        let half_theta = theta * T::from_f64(0.5);
 
         let sin_half = half_theta.sin();
         let cos_half = half_theta.cos();
 
         // Taylor series for small angles: sin(θ/2)/(θ) ≈ 0.5 - θ²/48
-        let taylor_sinc_half = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 48.0);
+        let taylor_sinc_half = T::from_f64(0.5) - theta_sq * T::from_f64(1.0 / 48.0);
 
         // Exact formula with safe division
-        let eps_sq = T::from_literal(1e-20);
+        let eps_sq = T::from_f64(1e-20);
         let theta_safe = (theta_sq + eps_sq).sqrt();
         let exact_sinc_half = sin_half / theta_safe;
 
         // Blend between Taylor and exact
-        let blend = theta_sq / (theta_sq + T::from_literal(0.001));
+        let blend = theta_sq / (theta_sq + T::from_f64(0.001));
         let sinc_half = taylor_sinc_half * (T::one() - blend) + exact_sinc_half * blend;
 
         Self {
@@ -643,18 +656,18 @@ impl<T: Real> Quat<T> {
         // (w.acos() is NaN for w > 1). Canonicalization above already guarantees w ≥ 0.
         let w_safe = if w > T::one() { T::one() } else { w };
         let half_theta = w_safe.acos();
-        let theta = half_theta * T::from_literal(2.0);
+        let theta = half_theta * T::from_f64(2.0);
         let theta_sq = theta * theta;
 
         // Taylor series for small angles: θ / sin(θ/2) ≈ 2 + θ²/12
-        let taylor_k = T::from_literal(2.0) + theta_sq * T::from_literal(1.0 / 12.0);
+        let taylor_k = T::from_f64(2.0) + theta_sq * T::from_f64(1.0 / 12.0);
 
         // Exact formula: θ / sin(θ/2) = θ / |xyz|
-        let eps = T::from_literal(1e-10);
+        let eps = T::from_f64(1e-10);
         let exact_k = theta / (xyz_norm + eps);
 
         // Blend between Taylor and exact
-        let blend = xyz_norm_sq / (xyz_norm_sq + T::from_literal(0.0001));
+        let blend = xyz_norm_sq / (xyz_norm_sq + T::from_f64(0.0001));
         let k = taylor_k * (T::one() - blend) + exact_k * blend;
 
         Vec3 {
@@ -673,7 +686,7 @@ impl<T: Real> Quat<T> {
         let y = self.y;
         let z = self.z;
 
-        let two = T::from_literal(2.0);
+        let two = T::from_f64(2.0);
 
         // Compute rotation matrix elements
         // R = I + 2w*K + 2*K^2 where K is skew-symmetric from (x,y,z)
@@ -789,11 +802,11 @@ pub fn rodrigues_to_matrix<T: Real>(rvec: Vec3<T>) -> Mat3<T> {
     let cos_theta = theta.cos();
 
     // Taylor series approximations (exact at theta=0)
-    let taylor_sinc = T::one() - theta_sq * T::from_literal(1.0 / 6.0);
-    let taylor_versin = T::from_literal(0.5) - theta_sq * T::from_literal(1.0 / 24.0);
+    let taylor_sinc = T::one() - theta_sq * T::from_f64(1.0 / 6.0);
+    let taylor_versin = T::from_f64(0.5) - theta_sq * T::from_f64(1.0 / 24.0);
 
     // Exact formulas with safe division
-    let eps_sq = T::from_literal(1e-20);
+    let eps_sq = T::from_f64(1e-20);
     let theta_safe = (theta_sq + eps_sq).sqrt();
     let theta_sq_safe = theta_sq + eps_sq;
 
@@ -803,7 +816,7 @@ pub fn rodrigues_to_matrix<T: Real>(rvec: Vec3<T>) -> Mat3<T> {
     // Smooth blending between Taylor and exact
     // For θ² < 0.001 (θ < 0.03 rad ≈ 2°): mostly Taylor
     // For θ² > 0.001: mostly exact
-    let blend_factor = theta_sq / (theta_sq + T::from_literal(0.001));
+    let blend_factor = theta_sq / (theta_sq + T::from_f64(0.001));
 
     let sin_theta_over_theta = taylor_sinc * (T::one() - blend_factor) + exact_sinc * blend_factor;
     let one_minus_cos_over_theta_sq =

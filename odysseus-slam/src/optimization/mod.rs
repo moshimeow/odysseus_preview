@@ -135,10 +135,10 @@ pub fn stereo_reprojection_residual_host_relative<T: Real>(
     // Compose with host (host is f64, delta is T)
     // q_new = q_host * q_delta
     let q_host_t = odysseus_solver::math3d::Quat::new(
-        T::from_literal(rotation_host.w),
-        T::from_literal(rotation_host.x),
-        T::from_literal(rotation_host.y),
-        T::from_literal(rotation_host.z),
+        T::from_f64(rotation_host.w),
+        T::from_f64(rotation_host.x),
+        T::from_f64(rotation_host.y),
+        T::from_f64(rotation_host.z),
     );
     let q_new = q_host_t * q_delta;
 
@@ -247,15 +247,15 @@ pub fn stereo_reprojection_residual_inverse_depth<T: Real>(
     // 3. Transform from point's host frame to world frame
     // point_host_pose components (f64) -> T
     let host_quat_t = odysseus_solver::math3d::Quat::new(
-        T::from_literal(point_host_pose.rotation.quat.w),
-        T::from_literal(point_host_pose.rotation.quat.x),
-        T::from_literal(point_host_pose.rotation.quat.y),
-        T::from_literal(point_host_pose.rotation.quat.z),
+        T::from_f64(point_host_pose.rotation.quat.w),
+        T::from_f64(point_host_pose.rotation.quat.x),
+        T::from_f64(point_host_pose.rotation.quat.y),
+        T::from_f64(point_host_pose.rotation.quat.z),
     );
     let host_trans_t = Vec3::new(
-        T::from_literal(point_host_pose.translation.x),
-        T::from_literal(point_host_pose.translation.y),
-        T::from_literal(point_host_pose.translation.z),
+        T::from_f64(point_host_pose.translation.x),
+        T::from_f64(point_host_pose.translation.y),
+        T::from_f64(point_host_pose.translation.z),
     );
     
     let point_host_vec = Vec3::new(point_host_x, point_host_y, point_host_z);
