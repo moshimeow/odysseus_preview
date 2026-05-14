@@ -1,3 +1,6 @@
 [submodule "basalt"]
 	path = basalt
 	url = https://gitlab.freedesktop.org/mateosss/basalt.git
+[submodule "references/camera-intrinsic-model-rs"]
+	path = references/camera-intrinsic-model-rs
+	url = https://github.com/powei-lin/camera-intrinsic-model-rs
