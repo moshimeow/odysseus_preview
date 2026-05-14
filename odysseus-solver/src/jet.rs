@@ -244,6 +244,20 @@ macro_rules! impl_jet_scalar_arithmetic {
             }
         }
 
+        // Jet * scalar
+        impl<const N: usize> Mul<$T> for Jet<$T, N> {
+            type Output = Self;
+
+            fn mul(self, rhs: $T) -> Self {
+                let result = Self {
+                    value: self.value * rhs,
+                    derivs: std::array::from_fn(|i| self.derivs[i] * rhs),
+                };
+                result.check_nan("mul(jet,scalar)");
+                result
+            }
+        }
+
         // Jet / scalar
         impl<const N: usize> Div<$T> for Jet<$T, N> {
             type Output = Self;

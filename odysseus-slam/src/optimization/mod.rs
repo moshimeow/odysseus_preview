@@ -11,6 +11,7 @@ use odysseus_solver::math3d::Vec3;
 use odysseus_solver::{Jet, Real};
 use std::collections::{HashMap, HashSet};
 
+pub mod calibration;
 pub mod graph_visualization;
 pub mod marginalization;
 pub mod slam;

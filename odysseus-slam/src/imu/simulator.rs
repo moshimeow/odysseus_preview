@@ -86,7 +86,7 @@ pub struct ImuSimulator {
     /// IMU sampling rate (Hz)
     pub imu_rate: f64,
     /// Gravity vector in world frame (m/s²)
-    /// Default: [0, 9.81, 0] (gravity points down in OpenCV world coords)
+    /// Default: [0, 9.81, 0] (gravity points in +Y in OpenCV Y-down world frame)
     pub gravity: Vector3<f64>,
 }
 
@@ -96,7 +96,7 @@ impl ImuSimulator {
         Self {
             noise_params,
             imu_rate,
-            gravity: Vector3::new(0.0, 9.81, 0.0), // gravity in OpenCV world coords (Y-down)
+            gravity: Vector3::new(0.0, 9.81, 0.0),
         }
     }
 
@@ -310,7 +310,7 @@ mod tests {
     fn test_imu_simulator_creation() {
         let sim = ImuSimulator::new(ImuNoiseParams::consumer_grade(), 200.0);
         assert_eq!(sim.imu_rate, 200.0);
-        assert_eq!(sim.gravity, Vector3::new(0.0, 0.0, -9.81));
+        assert_eq!(sim.gravity, Vector3::new(0.0, 9.81, 0.0));
     }
 
     #[test]
@@ -366,20 +366,21 @@ mod tests {
 
         assert!(!measurements.is_empty());
 
-        // Stationary: gyro should be 0, accel should be -gravity in body frame = [0, 0, 9.81]
+        // Stationary: gyro=0, accel = -gravity in body frame.
+        // Gravity is [0, 9.81, 0] in OpenCV Y-down world, so body accel = [0, -9.81, 0].
         for m in &measurements {
             assert!(
                 m.gyro.norm() < 1e-10,
                 "Gyro should be zero, got {:?}",
                 m.gyro
             );
-            assert!(
-                (m.accel.z - 9.81).abs() < 0.01,
-                "Accel Z should be ~9.81, got {}",
-                m.accel.z
-            );
             assert!(m.accel.x.abs() < 1e-10, "Accel X should be ~0");
-            assert!(m.accel.y.abs() < 1e-10, "Accel Y should be ~0");
+            assert!(
+                (m.accel.y + 9.81).abs() < 0.01,
+                "Accel Y should be ~-9.81, got {}",
+                m.accel.y
+            );
+            assert!(m.accel.z.abs() < 1e-10, "Accel Z should be ~0");
         }
     }
 
@@ -395,26 +396,26 @@ mod tests {
         assert!(!measurements.is_empty());
         assert!(measurements.len() > 1000); // 10s at 200Hz
 
-        // For a horizontal circle with fixed orientation:
-        // - Angular velocity should be 0 (no rotation)
-        // - Centripetal acceleration = ω²R = (2π/T)² * R, pointing toward center
+        // The trajectory circles in XY: at t=0 position=(r,0,0), centripetal points in -X.
+        // With gravity=[0,9.81,0] and identity orientation, body accel = [-ω²R, -9.81, 0].
+        // Checking |accel_x| isolates centripetal cleanly (no gravity in X at this pose).
         let omega = 2.0 * std::f64::consts::PI / duration;
         let expected_centripetal = omega * omega * radius;
 
-        // Check a sample in the middle
-        let mid_idx = measurements.len() / 2;
-        let m = &measurements[mid_idx];
+        // Use a sample near the start where centripetal is nearly purely in -X
+        let m = &measurements[1];
 
-        // Gyro should be ~0 (fixed orientation)
         assert!(m.gyro.norm() < 0.01, "Gyro should be ~0, got {:?}", m.gyro);
-
-        // Acceleration should be centripetal (in XY plane) + gravity contribution
-        let accel_xy = (m.accel.x.powi(2) + m.accel.y.powi(2)).sqrt();
         assert!(
-            (accel_xy - expected_centripetal).abs() < 0.5,
+            (m.accel.x.abs() - expected_centripetal).abs() < 0.1,
             "Centripetal accel should be ~{:.3}, got {:.3}",
             expected_centripetal,
-            accel_xy
+            m.accel.x.abs()
+        );
+        assert!(
+            (m.accel.y + 9.81).abs() < 0.1,
+            "Accel Y should be ~-9.81 (gravity), got {}",
+            m.accel.y
         );
     }
 
@@ -450,21 +451,17 @@ mod tests {
         let sim = ImuSimulator::ideal(100.0);
         let measurements = sim.generate_from_continuous_trajectory(&traj, 5.0, 42);
 
-        // With constant velocity: dv/dt = 0
-        // So accel should only be gravity: [0, 0, 9.81] (since orientation is identity)
+        // With constant velocity: dv/dt = 0, so accel = -gravity in body frame.
+        // Gravity = [0, 9.81, 0] in Y-down world, identity orientation → accel = [0, -9.81, 0].
         for m in &measurements {
             assert!(m.gyro.norm() < 1e-10, "Gyro should be 0");
+            assert!(m.accel.x.abs() < 0.01, "Accel X should be ~0, got {}", m.accel.x);
             assert!(
-                m.accel.x.abs() < 0.01,
-                "Accel X should be ~0, got {}",
-                m.accel.x
+                (m.accel.y + 9.81).abs() < 0.01,
+                "Accel Y should be ~-9.81, got {}",
+                m.accel.y
             );
-            assert!(m.accel.y.abs() < 0.01, "Accel Y should be ~0");
-            assert!(
-                (m.accel.z - 9.81).abs() < 0.01,
-                "Accel Z should be ~9.81, got {}",
-                m.accel.z
-            );
+            assert!(m.accel.z.abs() < 0.01, "Accel Z should be ~0");
         }
     }
 

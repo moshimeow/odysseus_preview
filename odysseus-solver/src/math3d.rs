@@ -221,6 +221,17 @@ impl<T: Copy + nalgebra::Scalar> From<Vec3<T>> for nalgebra::Vector3<T> {
         nalgebra::Vector3::new(v.x, v.y, v.z)
     }
 }
+
+impl<T: Copy + nalgebra::Scalar> From<nalgebra::Matrix3<T>> for Mat3<T> {
+    fn from(m: nalgebra::Matrix3<T>) -> Self {
+        Mat3::from_cols(
+            Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
+            Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
+            Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
+        )
+    }
+}
+
 // For now, we only provide Vec3 * scalar and Vec3 / scalar.
 
 // ============================================================================
@@ -298,6 +309,15 @@ impl<T: Copy> Mat3<T> {
 }
 
 impl<T: Real> Mat3<T> {
+    /// Zero matrix
+    pub fn zeros() -> Self {
+        Self {
+            x_axis: Vec3::new(T::zero(), T::zero(), T::zero()),
+            y_axis: Vec3::new(T::zero(), T::zero(), T::zero()),
+            z_axis: Vec3::new(T::zero(), T::zero(), T::zero()),
+        }
+    }
+
     /// Identity matrix
     pub fn identity() -> Self {
         Self {
@@ -367,6 +387,29 @@ impl<T: Real> Mat3<T> {
             x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z,
             y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z,
             z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z,
+        }
+    }
+}
+
+impl<T: Copy> std::ops::Index<(usize, usize)> for Mat3<T> {
+    type Output = T;
+    fn index(&self, (row, col): (usize, usize)) -> &T {
+        match col {
+            0 => match row { 0 => &self.x_axis.x, 1 => &self.x_axis.y, 2 => &self.x_axis.z, _ => panic!("row out of range") },
+            1 => match row { 0 => &self.y_axis.x, 1 => &self.y_axis.y, 2 => &self.y_axis.z, _ => panic!("row out of range") },
+            2 => match row { 0 => &self.z_axis.x, 1 => &self.z_axis.y, 2 => &self.z_axis.z, _ => panic!("row out of range") },
+            _ => panic!("col out of range"),
+        }
+    }
+}
+
+impl<T: Copy> std::ops::IndexMut<(usize, usize)> for Mat3<T> {
+    fn index_mut(&mut self, (row, col): (usize, usize)) -> &mut T {
+        match col {
+            0 => match row { 0 => &mut self.x_axis.x, 1 => &mut self.x_axis.y, 2 => &mut self.x_axis.z, _ => panic!("row out of range") },
+            1 => match row { 0 => &mut self.y_axis.x, 1 => &mut self.y_axis.y, 2 => &mut self.y_axis.z, _ => panic!("row out of range") },
+            2 => match row { 0 => &mut self.z_axis.x, 1 => &mut self.z_axis.y, 2 => &mut self.z_axis.z, _ => panic!("row out of range") },
+            _ => panic!("col out of range"),
         }
     }
 }

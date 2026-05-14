@@ -554,6 +554,7 @@ impl Default for WorldState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_abs_diff_eq;
     use odysseus_solver::math3d::Vec3;
 
     #[test]
@@ -567,10 +568,11 @@ mod tests {
         assert_eq!(id, 0);
         assert_eq!(world.num_points(), 1);
 
+        // get_point round-trips through inverse-depth representation; use approx equality
         let retrieved = world.get_point(id).unwrap();
-        assert_eq!(retrieved.x, 1.0);
-        assert_eq!(retrieved.y, 2.0);
-        assert_eq!(retrieved.z, 3.0);
+        assert_abs_diff_eq!(retrieved.x, 1.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(retrieved.y, 2.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(retrieved.z, 3.0, epsilon = 1e-10);
     }
 
     #[test]
@@ -583,9 +585,9 @@ mod tests {
         world.update_point(id, Vec3::new(4.0, 5.0, 6.0));
 
         let updated = world.get_point(id).unwrap();
-        assert_eq!(updated.x, 4.0);
-        assert_eq!(updated.y, 5.0);
-        assert_eq!(updated.z, 6.0);
+        assert_abs_diff_eq!(updated.x, 4.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(updated.y, 5.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(updated.z, 6.0, epsilon = 1e-10);
     }
 
     #[test]

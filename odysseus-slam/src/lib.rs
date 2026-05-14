@@ -4,6 +4,7 @@
 //! This library implements bundle adjustment for visual SLAM using const generics
 //! and forward-mode automatic differentiation from odysseus-solver.
 
+pub mod calibration;
 pub mod camera;
 pub mod frame_graph;
 pub mod geometry;
@@ -20,7 +21,11 @@ pub mod vio_slam_system;
 pub mod visualization;
 pub mod world_state;
 // Re-export key types
-pub use camera::{PinholeCamera, StereoCamera};
+pub use calibration::{AprilGridLayout, BoardObservation, CornerObservation, CornerKey};
+pub use camera::{
+    BlenderPolyFisheyeCamera, CameraModel, DoubleSphereCamera, KannalaBrandtCamera,
+    PinholeCamera, StereoCamera,
+};
 pub use frame_graph::{FrameGraph, FrameRole, FrameState, OptimizationState};
 pub use geometry::{Point3D, StereoObservation};
 pub use math::{SE3, SE3Tangent, SO3};
