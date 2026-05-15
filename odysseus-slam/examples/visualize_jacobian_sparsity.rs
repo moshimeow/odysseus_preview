@@ -5,7 +5,7 @@
 //! Also visualizes the synthetic data in Rerun.
 
 use odysseus_slam::{
-    camera::StereoCamera,
+    camera::{PinholeCamera, StereoCamera},
     math::SE3,
     WorldState,
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
@@ -203,7 +203,7 @@ fn visualize_synthetic_data(
     rec: &rr::RecordingStream,
     points: &[odysseus_solver::math3d::Vec3<f64>],
     poses: &[SE3<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 3D points (blue)
     let point_positions: Vec<[f32; 3]> = points
@@ -253,7 +253,7 @@ fn visualize_stereo_camera(
     rec: &rr::RecordingStream,
     entity_path: &str,
     pose: &SE3<f64>,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     color: [u8; 4],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let camera_rot = pose.rotation.to_matrix();

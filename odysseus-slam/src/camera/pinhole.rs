@@ -102,6 +102,26 @@ impl<T: Real> CameraModel<T> for PinholeCamera<T> {
     fn project(&self, point_cam: Vec3<T>) -> (T, T) {
         PinholeCamera::project(self, point_cam)
     }
+
+    fn unproject(&self, u: T, v: T) -> Vec3<T> {
+        // Convention: ray with z = 1.
+        let x = (u - self.cx) / self.fx;
+        let y = (v - self.cy) / self.fy;
+        Vec3::new(x, y, T::one())
+    }
+
+    fn unproject_at_depth(&self, u: T, v: T, depth: T) -> Vec3<T> {
+        // Pinhole has a closed form, no need for the generic scale-by-z.
+        PinholeCamera::unproject(self, u, v, depth)
+    }
+}
+
+impl crate::camera::CameraConstantJet for PinholeCamera<f64> {
+    type Jet<const N: usize> = PinholeCamera<odysseus_solver::Jet<f64, N>>;
+
+    fn constant_jet<const N: usize>(&self) -> Self::Jet<N> {
+        self.to_constant::<N>()
+    }
 }
 
 #[cfg(test)]

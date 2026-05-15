@@ -1,4 +1,4 @@
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::imu::preintegration::PreintegratedImu;
@@ -79,7 +79,7 @@ pub struct VioResult {
 /// Inter-keyframe priors provide constraints between consecutive keyframes,
 /// connecting optimized keyframes to fixed keyframes from GBA.
 pub fn run_vio_bundle_adjustment(
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     frame_graph: &FrameGraph,
     world: &mut WorldState,
     frame_observations: &[Vec<StereoObservation>],
@@ -547,7 +547,7 @@ fn compute_vio_cost(
     preintegrations: &[PreintegratedImu],
     pose_to_param_idx: &HashMap<usize, usize>,
     point_to_param_idx: &HashMap<usize, usize>,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     gravity: &[f64; 3],
     config: &VioConfig,
     point_priors: &PointPriors,

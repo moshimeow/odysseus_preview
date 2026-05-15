@@ -90,7 +90,11 @@ struct Metadata {
     spacing_ratio: f64,
     /// Side length of the pattern itself (no outer margin), metres.
     pattern_size_m: f64,
-    /// PNG dimensions, including outer white margin.
+    /// Full PNG width / height in metres (pattern + outer margin) — set the
+    /// Blender plane to this so the whole texture lies on the plane.
+    image_width_m: f64,
+    image_height_m: f64,
+    /// PNG dimensions in pixels, including outer white margin.
     image_width_px: u32,
     image_height_px: u32,
     /// Pattern (excluding outer margin) dimensions in pixels.
@@ -235,6 +239,8 @@ fn main() {
         tag_size_m: args.tag_size_m,
         spacing_ratio: args.spacing_ratio,
         pattern_size_m,
+        image_width_m: img_w as f64 / pixels_per_meter,
+        image_height_m: img_h as f64 / pixels_per_meter,
         image_width_px: img_w,
         image_height_px: img_h,
         pattern_width_px: pattern_w,

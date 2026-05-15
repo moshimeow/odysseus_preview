@@ -168,6 +168,10 @@ where
     fn project(&self, point_cam: Vec3<T>) -> (T, T) {
         BlenderPolyFisheyeCamera::project(self, point_cam)
     }
+
+    fn unproject(&self, u: T, v: T) -> Vec3<T> {
+        BlenderPolyFisheyeCamera::unproject(self, u, v)
+    }
 }
 
 #[cfg(test)]

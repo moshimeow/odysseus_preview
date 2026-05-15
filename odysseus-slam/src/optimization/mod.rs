@@ -122,7 +122,7 @@ pub fn stereo_reprojection_residual_host_relative<T: Real>(
     rotation_host: &odysseus_solver::math3d::Quat<f64>,
     pose_params: &[T; 6], // [rotation_delta (3), translation (3)]
     world_point: &[T; 3],
-    stereo_camera: &StereoCamera<T>,
+    stereo_camera: &StereoCamera<crate::camera::PinholeCamera<T>, T>,
     observed_left_u: T,
     observed_left_v: T,
     observed_right_u: T,
@@ -229,7 +229,7 @@ pub fn stereo_reprojection_residual_inverse_depth<T: Real>(
     camera_pose_params: &[T; 6], // [rotation_delta (3), translation (3)]
     point_params: &[T; 3],        // [direction_u, direction_v, inv_depth]
     point_host_pose: &SE3<f64>,   // Fixed host pose from PointInfo
-    stereo_camera: &StereoCamera<T>,
+    stereo_camera: &StereoCamera<crate::camera::PinholeCamera<T>, T>,
     observed_left_u: T,
     observed_left_v: T,
     observed_right_u: T,

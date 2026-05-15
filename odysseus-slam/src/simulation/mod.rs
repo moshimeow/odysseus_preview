@@ -1,6 +1,6 @@
 //! Simulation and synthetic data generation
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::geometry::{StereoObservation, Point3D};
 use crate::math::SE3;
 use rand::{Rng, SeedableRng};
@@ -58,7 +58,7 @@ pub fn generate_random_points(
 pub fn generate_stereo_observations(
     points: &[Point3D<f64>],
     poses: &[SE3<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     image_width: f64,
     image_height: f64,
 ) -> Vec<StereoObservation> {

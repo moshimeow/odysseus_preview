@@ -1,6 +1,6 @@
 //! Shared Rerun visualization functions for SLAM demos
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, FrameRole, OptimizationState};
 use crate::geometry::Point3D;
 use crate::math::SE3;
@@ -42,7 +42,7 @@ pub fn visualize_stereo_camera(
     rec: &rr::RecordingStream,
     entity_path: &str,
     pose: &SE3<f64>,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     color: [u8; 4], // RGBA color for the camera
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Convert rotation to 3x3 array for Rerun visualization
@@ -135,7 +135,7 @@ pub fn visualize_ground_truth(
     rec: &rr::RecordingStream,
     points: Option<&[Point3D<f64>]>,
     poses: &[SE3<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Set trajectory timeline so ground truth appears on it
     rec.set_time_sequence("trajectory", 0);
@@ -209,7 +209,7 @@ pub fn visualize_estimate_with_gt_points(
     world: &WorldState,
     frame_graph: &FrameGraph,
     gt_points: &[Point3D<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     prev_frame_graph: Option<&FrameGraph>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // First render the estimate (includes error lines)
@@ -262,7 +262,7 @@ pub fn visualize_estimate(
     world: &WorldState,
     frame_graph: &FrameGraph,
     gt_points: &[Point3D<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     prev_frame_graph: Option<&FrameGraph>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Set trajectory timeline
@@ -412,7 +412,7 @@ pub fn visualize_gba_update(
     gba_world: &WorldState,
     gba_frame_graph: &FrameGraph,
     gt_points: &[Point3D<f64>],
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     prev_gba_frame_graph: Option<&FrameGraph>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use a separate timeline for GBA updates

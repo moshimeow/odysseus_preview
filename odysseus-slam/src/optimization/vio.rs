@@ -1,4 +1,4 @@
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::imu::preintegration::{Matrix9, PreintegratedImu};
@@ -74,7 +74,7 @@ pub struct VioResult {
 /// This is a simplified version for basic VIO without the complexity of
 /// inter-keyframe priors used when integrating with GBA.
 pub fn run_simple_vio_bundle_adjustment(
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     frame_graph: &FrameGraph,
     world: &mut WorldState,
     frame_observations: &[Vec<StereoObservation>],
@@ -551,7 +551,7 @@ fn compute_simple_vio_cost(
     preintegrations: &[PreintegratedImu],
     pose_to_param_idx: &HashMap<usize, usize>,
     point_to_param_idx: &HashMap<usize, usize>,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     gravity: &[f64; 3],
     config: &VioConfig,
     priors: &[super::VioMarginalizedPrior],

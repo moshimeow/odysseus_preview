@@ -20,7 +20,7 @@
 use backtrace_on_stack_overflow;
 use clap::Parser;
 use odysseus_slam::{
-    camera::StereoCamera,
+    camera::{PinholeCamera, StereoCamera},
     frame_graph::{FrameGraph, FrameRole, OptimizationState},
     geometry::StereoObservation,
     math::SE3,
@@ -190,7 +190,7 @@ fn pixel_to_world_point(
     y: f64,
     depth: f32,
     camera_pose: &SE3<f64>,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
 ) -> Vec3<f64> {
     // Convert pixel to normalized camera coordinates
     let cam_x = (x - stereo_camera.left.cx) / stereo_camera.left.fx;

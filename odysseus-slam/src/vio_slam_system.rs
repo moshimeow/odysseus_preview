@@ -6,7 +6,7 @@
 //! - LBA: Fast, optimizes only window frames with keyframes Fixed
 //! - GBA: Thorough, optimizes all keyframes + window, runs continuously
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, FrameRole, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::imu::ImuFrameState;
@@ -77,7 +77,7 @@ impl VioSlamSystem {
     /// * `stereo_camera` - Camera model
     /// * `frame_observations` - Shared reference to all observations (read-only)
     pub fn new(
-        stereo_camera: StereoCamera<f64>,
+        stereo_camera: StereoCamera<PinholeCamera<f64>, f64>,
         frame_observations: Arc<Vec<Vec<StereoObservation>>>,
     ) -> Self {
         let (to_gba_tx, to_gba_rx) = mpsc::channel::<VioLbaToGbaMsg>();
@@ -153,7 +153,7 @@ const GBA_WINDOW_SIZE: usize = 2;
 fn vio_gba_thread_loop(
     from_lba: Receiver<VioLbaToGbaMsg>,
     to_lba: Sender<VioGbaToLbaMsg>,
-    stereo_camera: StereoCamera<f64>,
+    stereo_camera: StereoCamera<PinholeCamera<f64>, f64>,
     frame_observations: Arc<Vec<Vec<StereoObservation>>>,
 ) {
     // GBA state

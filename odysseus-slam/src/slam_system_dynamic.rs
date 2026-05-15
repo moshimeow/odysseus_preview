@@ -11,7 +11,7 @@
 //! - LBA: Fast, optimizes only window frames with keyframes Fixed
 //! - GBA: Thorough, optimizes all keyframes + window, runs continuously
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, FrameRole, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::world_state::WorldState;
@@ -65,7 +65,7 @@ impl SlamSystemDynamic {
     ///
     /// # Arguments
     /// * `stereo_camera` - Camera model
-    pub fn new(stereo_camera: StereoCamera<f64>) -> Self {
+    pub fn new(stereo_camera: StereoCamera<PinholeCamera<f64>, f64>) -> Self {
         let (to_gba_tx, to_gba_rx) = mpsc::channel::<LbaToGbaMsg>();
         let (from_gba_tx, from_gba_rx) = mpsc::channel::<GbaToLbaMsg>();
 
@@ -136,7 +136,7 @@ const GBA_WINDOW_SIZE: usize = 2;
 fn gba_thread_loop(
     from_lba: Receiver<LbaToGbaMsg>,
     to_lba: Sender<GbaToLbaMsg>,
-    stereo_camera: StereoCamera<f64>,
+    stereo_camera: StereoCamera<PinholeCamera<f64>, f64>,
 ) {
     // GBA state
     let mut gba_world: Option<WorldState> = None;

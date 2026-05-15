@@ -2,7 +2,7 @@
 //!
 //! This module contains the bundle adjustment optimization for stereo visual SLAM.
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::frame_graph::{FrameGraph, OptimizationState};
 use crate::geometry::StereoObservation;
 use crate::world_state::WorldState;
@@ -163,7 +163,7 @@ pub struct BundleAdjustmentResult {
 /// * `fixed_point_ids` - Set of point IDs that should be fixed (not optimized)
 /// * `config` - Solver configuration
 pub fn run_bundle_adjustment(
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     frame_graph: &FrameGraph,
     world: &mut WorldState,
     frame_observations: &[Vec<StereoObservation>],
@@ -484,7 +484,7 @@ fn compute_ba_cost(
     pose_to_param_idx: &HashMap<usize, usize>,
     point_to_param_idx: &HashMap<usize, usize>,
     world: &WorldState,
-    stereo_camera: &StereoCamera<f64>,
+    stereo_camera: &StereoCamera<PinholeCamera<f64>, f64>,
     huber_delta: f64,
     obs_std_dev: f64,
     prior: Option<&MarginalizedPrior>,

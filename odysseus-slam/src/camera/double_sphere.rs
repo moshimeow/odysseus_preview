@@ -115,6 +115,18 @@ where
     fn project(&self, point_cam: Vec3<T>) -> (T, T) {
         DoubleSphereCamera::project(self, point_cam)
     }
+
+    fn unproject(&self, u: T, v: T) -> Vec3<T> {
+        DoubleSphereCamera::unproject(self, u, v)
+    }
+}
+
+impl crate::camera::CameraConstantJet for DoubleSphereCamera<f64> {
+    type Jet<const N: usize> = DoubleSphereCamera<odysseus_solver::Jet<f64, N>>;
+
+    fn constant_jet<const N: usize>(&self) -> Self::Jet<N> {
+        self.to_constant::<N>()
+    }
 }
 
 #[cfg(test)]

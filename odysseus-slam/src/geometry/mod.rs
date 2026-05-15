@@ -1,6 +1,6 @@
 //! Geometry primitives
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::math::SE3;
 use odysseus_solver::math3d::Vec3;
 
@@ -60,7 +60,7 @@ impl StereoObservation {
     /// then unprojects to 3D and transforms to world frame.
     pub fn triangulate(
         &self,
-        camera: &StereoCamera<f64>,
+        camera: &StereoCamera<PinholeCamera<f64>, f64>,
         pose: &SE3<f64>,
     ) -> Option<Point3D<f64>> {
         // Compute disparity (horizontal pixel difference)

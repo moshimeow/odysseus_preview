@@ -4,7 +4,7 @@
 //! represent "our current estimate of the world". Both are optimized
 //! together during bundle adjustment.
 
-use crate::camera::StereoCamera;
+use crate::camera::{PinholeCamera, StereoCamera};
 use crate::geometry::{Point3D, StereoObservation};
 use crate::math::{stereographic, SE3};
 use std::collections::HashMap;
@@ -278,7 +278,7 @@ impl WorldState {
     pub fn triangulate_and_add_point(
         &mut self,
         obs: &StereoObservation,
-        camera: &StereoCamera<f64>,
+        camera: &StereoCamera<PinholeCamera<f64>, f64>,
         keyframe_idx: usize,
     ) -> bool {
         if keyframe_idx >= self.frames.len() {

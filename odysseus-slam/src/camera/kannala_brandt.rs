@@ -140,6 +140,10 @@ where
     fn project(&self, point_cam: Vec3<T>) -> (T, T) {
         KannalaBrandtCamera::project(self, point_cam)
     }
+
+    fn unproject(&self, u: T, v: T) -> Vec3<T> {
+        KannalaBrandtCamera::unproject(self, u, v)
+    }
 }
 
 #[cfg(test)]
