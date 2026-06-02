@@ -11,11 +11,13 @@
 //! `Vec<BoardObservation>` and recovers intrinsics + per-frame extrinsics.
 
 pub mod board;
+pub mod planar_pose;
 
 #[cfg(feature = "aprilgrid")]
 pub mod detector;
 
 pub use board::AprilGridLayout;
+pub use planar_pose::{estimate_board_pose, PlanarPoseError};
 
 use odysseus_solver::math3d::Vec3;
 
