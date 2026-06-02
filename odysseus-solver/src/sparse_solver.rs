@@ -141,13 +141,34 @@ where
     /// * `callback` - Optional callback called after each iteration
     pub fn solve<F, C>(
         &mut self,
-        mut params: DVector<T>,
-        mut cost_fn: F,
-        mut callback: C,
+        params: DVector<T>,
+        cost_fn: F,
+        callback: C,
     ) -> DVector<T>
     where
         F: FnMut(&DVector<T>, &mut [T], &mut [T]),
         C: FnMut(usize, &IterationResult<T>, &DVector<T>),
+    {
+        self.solve_with_accept(params, cost_fn, callback, |_| {})
+    }
+
+    /// Like `solve`, but additionally takes an `on_accept` callback fired
+    /// exactly when LM accepts a step (after `params` has been updated to the
+    /// new accepted point). Use this to refresh cost-function state that
+    /// should track the current linearization point — e.g. proximal anchors,
+    /// IRLS reweighting, annealed sigmas — without that state seeing
+    /// rejected trial evaluations.
+    pub fn solve_with_accept<F, C, A>(
+        &mut self,
+        mut params: DVector<T>,
+        mut cost_fn: F,
+        mut callback: C,
+        mut on_accept: A,
+    ) -> DVector<T>
+    where
+        F: FnMut(&DVector<T>, &mut [T], &mut [T]),
+        C: FnMut(usize, &IterationResult<T>, &DVector<T>),
+        A: FnMut(&DVector<T>),
     {
         let mut lambda = self.initial_lambda;
 
@@ -231,6 +252,8 @@ where
             if new_error < error {
                 params = new_params;
                 lambda = lambda * self.lambda_scale_down;
+
+                on_accept(&params);
 
                 let result = IterationResult {
                     error,
