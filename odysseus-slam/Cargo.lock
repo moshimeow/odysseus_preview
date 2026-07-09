@@ -6366,18 +6366,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "odysseus-camera"
+version = "0.1.0"
+dependencies = [
+ "aprilgrid",
+ "image 0.25.9",
+ "nalgebra 0.32.6",
+ "odysseus-solver",
+]
+
+[[package]]
+name = "odysseus-imu"
+version = "0.1.0"
+dependencies = [
+ "nalgebra 0.32.6",
+ "odysseus-solver",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_distr 0.4.3",
+]
+
+[[package]]
 name = "odysseus-slam"
 version = "0.1.0"
 dependencies = [
  "approx 0.5.1",
- "aprilgrid",
  "backtrace-on-stack-overflow",
  "clap",
  "exr",
  "image 0.24.9",
- "image 0.25.9",
  "nalgebra 0.32.6",
  "num-traits",
+ "odysseus-camera",
+ "odysseus-imu",
  "odysseus-slam-frontend",
  "odysseus-solver",
  "rand 0.8.5",

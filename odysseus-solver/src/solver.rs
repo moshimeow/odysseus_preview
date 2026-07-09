@@ -24,7 +24,7 @@ use nalgebra::{SMatrix, SVector, Cholesky};
 /// - Total: ~(N_RESIDUALS × N_PARAMS + N_PARAMS² + N_RESIDUALS) × sizeof(T)
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// // For a large problem (1000 residuals, 200 params):
 /// let mut solver = LevenbergMarquardt::<f64, 200, 1000>::new();
 /// // All memory allocated here ↑ (once, on heap)

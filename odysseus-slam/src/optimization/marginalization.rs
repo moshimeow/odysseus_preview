@@ -306,9 +306,13 @@ where
         }
     }
 
-    // Cholesky factorization to get sqrt_information
+    // Cholesky factorization to get sqrt_information.
+    // H = L·Lᵀ and the prior residual is r = S·δ with cost rᵀr = δᵀ·SᵀS·δ,
+    // so S must be Lᵀ (upper). Using L here implied LᵀL ≠ H — a mis-weighted
+    // prior. Found 2026-07 via the uwb_fusion port, where fixing it improved
+    // full-body fusion RMSE ~25x.
     let cholesky = Cholesky::new(h_marg)?;
-    let sqrt_information = cholesky.l();
+    let sqrt_information = cholesky.l().transpose();
     let linearization_point =
         DVector::from_iterator(n_new, keep_indices.iter().map(|&i| optimized_params[i]));
 

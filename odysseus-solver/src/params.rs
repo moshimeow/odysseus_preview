@@ -1,68 +1,50 @@
-/// Defines a parameter struct whose fields each convert to/from a fixed-size array,
-/// and generates `From<[T; N]>` and `From<Struct> for [T; N]` by concatenating chunks.
-///
-/// Each field must be a type that already implements `From<[T; n]>` and `[T; n]: From<FieldType>`.
-///
-/// Example:
-/// ```
-/// use odysseus_solver::compose_params;
-/// use odysseus_solver::math3d::Vec3;
-///
-/// compose_params! {
-///     pub struct MyParams<T> {
-///         position: Vec3<T> [3],
-///         velocity: Vec3<T> [3],
-///     }
-/// }
-///
-/// let arr: [f64; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-/// let p = MyParams::from(arr);
-/// let back: [f64; 6] = p.into();
-/// ```
-#[macro_export]
-macro_rules! compose_params {
-    (
-        $(#[$attr:meta])*
-        $vis:vis struct $name:ident<$T:ident> {
-            $($field:ident : $ftype:ty [$n:literal]),* $(,)?
-        }
-    ) => {
-        $(#[$attr])*
-        $vis struct $name<$T> {
-            $(pub $field: $ftype,)*
-        }
+//! `compose_params!` — parameter structs with array conversions and
+//! problem-builder block helpers.
+//!
+//! The macro itself is a proc-macro in `odysseus-solver-macros` (re-exported
+//! from this crate's root); it emits the struct, `From<[T; DIM]>` both ways,
+//! a `DIM` const, and one `BlockRef` helper per field so factor wiring never
+//! repeats offset/dimension literals. See the macro's own docs for details.
 
-        impl<$T: Copy + Default> From<[$T; { 0usize $(+ $n)* }]> for $name<$T>
-        where
-            $($ftype: From<[$T; $n]>,)*
-        {
-            fn from(arr: [$T; { 0usize $(+ $n)* }]) -> Self {
-                let mut _offset = 0usize;
-                $(
-                    let $field = {
-                        let chunk: [$T; $n] = std::array::from_fn(|i| arr[_offset + i]);
-                        _offset += $n;
-                        <$ftype>::from(chunk)
-                    };
-                )*
-                Self { $($field,)* }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use crate::compose_params;
+    use crate::math3d::Vec3;
+    use crate::problem::{Problem, SolveOptions};
 
-        impl<$T: Copy + Default> From<$name<$T>> for [$T; { 0usize $(+ $n)* }]
-        where
-            $([$T; $n]: From<$ftype>,)*
-        {
-            fn from(val: $name<$T>) -> Self {
-                let mut out = [$T::default(); { 0usize $(+ $n)* }];
-                let mut _offset = 0usize;
-                $(
-                    let chunk: [$T; $n] = <[$T; $n]>::from(val.$field);
-                    out[_offset.._offset + $n].copy_from_slice(&chunk);
-                    _offset += $n;
-                )*
-                out
-            }
+    compose_params! {
+        struct TestParams<T> {
+            position: Vec3<T> [3],
+            velocity: Vec3<T> [3],
         }
-    };
+    }
+
+    #[test]
+    fn roundtrip_and_dim() {
+        assert_eq!(TestParams::<f64>::DIM, 6);
+        let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let p = TestParams::from(arr);
+        assert_eq!(p.position.y, 2.0);
+        assert_eq!(p.velocity.z, 6.0);
+        let back: [f64; 6] = p.into();
+        assert_eq!(back, arr);
+    }
+
+    /// The generated block helpers wire priors to the right sub-ranges:
+    /// a prior through `TestParams::velocity` must move dims 3..6 only.
+    #[test]
+    fn block_helpers_target_correct_dims() {
+        let mut pb = Problem::new();
+        let key = pb.add_block([0.0; 6]);
+        let k_pos = pb.kind("pos").sigma(1.0).key();
+        pb.prior(k_pos, TestParams::<f64>::position(key), [1.0, 2.0, 3.0]);
+        let k_vel = pb.kind("vel").sigma(1.0).key();
+        pb.prior(k_vel, TestParams::<f64>::velocity(key), [4.0, 5.0, 6.0]);
+        let mut prepared = pb.prepare();
+        prepared.solve(&SolveOptions::default());
+        let solved = prepared.block(key);
+        for (i, expect) in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].iter().enumerate() {
+            assert!((solved[i] - expect).abs() < 1e-9, "dim {i}: {solved:?}");
+        }
+    }
 }

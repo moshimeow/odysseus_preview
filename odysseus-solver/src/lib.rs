@@ -4,14 +4,19 @@
 //! All sizes are known at compile time, with workspace pre-allocated on the heap
 //! for optimal performance in long-running VR tracking sessions.
 
+// Let macro-generated `::odysseus_solver::` paths resolve inside this crate.
+extern crate self as odysseus_solver;
+
 mod jet;
 pub mod math3d;
 pub mod params;
+pub mod problem;
 pub mod solver;
 pub mod sparse_solver;
 
 pub use jet::{split_jets, Jet, Real};
-pub use odysseus_solver_macros::real_fn;
+pub use odysseus_solver_macros::{compose_params, real_fn};
+pub use problem::apply_huber_loss;
 pub use solver::LevenbergMarquardt;
 pub use sparse_solver::{SparseLevenbergMarquardt, build_slam_entries};
 

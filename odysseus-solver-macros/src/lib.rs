@@ -62,3 +62,171 @@ fn rewrite_literal(lit: Literal) -> Vec<TokenTree> {
     let expanded = quote! { #t::#from_f64(#value_lit) };
     expanded.into_iter().collect()
 }
+
+// ── compose_params ───────────────────────────────────────────────────────────
+
+use quote::format_ident;
+use syn::parse::{Parse, ParseStream};
+use syn::{braced, bracketed, Attribute, Ident, LitInt, Token, Type, Visibility};
+
+struct ComposeParamsInput {
+    attrs: Vec<Attribute>,
+    vis: Visibility,
+    name: Ident,
+    ty_param: Ident,
+    fields: Vec<(Ident, Type, usize)>,
+}
+
+impl Parse for ComposeParamsInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(Attribute::parse_outer)?;
+        let vis: Visibility = input.parse()?;
+        input.parse::<Token![struct]>()?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![<]>()?;
+        let ty_param: Ident = input.parse()?;
+        input.parse::<Token![>]>()?;
+        let body;
+        braced!(body in input);
+        let mut fields = Vec::new();
+        while !body.is_empty() {
+            let field: Ident = body.parse()?;
+            body.parse::<Token![:]>()?;
+            let ty: Type = body.parse()?;
+            let dims;
+            bracketed!(dims in body);
+            let n: LitInt = dims.parse()?;
+            fields.push((field, ty, n.base10_parse()?));
+            if body.peek(Token![,]) {
+                body.parse::<Token![,]>()?;
+            }
+        }
+        Ok(Self { attrs, vis, name, ty_param, fields })
+    }
+}
+
+/// Defines a parameter struct whose fields each convert to/from a fixed-size
+/// array, generating:
+///
+/// - `From<[T; DIM]>` and `From<Struct> for [T; DIM]` (chunk concatenation);
+/// - `Struct::<T>::DIM` — the total parameter count;
+/// - one associated fn per field, `Struct::<T>::field(key) -> BlockRef<n>`,
+///   mapping a problem-builder `BlockKey<DIM>` to that field's sub-block —
+///   so factor wiring never repeats offset/dimension literals.
+///
+/// ```ignore
+/// use odysseus_solver::compose_params;
+/// use odysseus_solver::math3d::Vec3;
+///
+/// compose_params! {
+///     pub struct MyParams<T> {
+///         position: Vec3<T> [3],
+///         velocity: Vec3<T> [3],
+///     }
+/// }
+///
+/// let arr: [f64; MyParams::<f64>::DIM] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+/// let p = MyParams::from(arr);
+/// let back: [f64; 6] = p.into();
+///
+/// let mut pb = odysseus_solver::problem::Problem::new();
+/// let key = pb.add_block(back);
+/// let vel_ref = MyParams::<f64>::velocity(key); // BlockRef<3> at offset 3
+/// # let _ = (p, vel_ref);
+/// ```
+#[proc_macro]
+pub fn compose_params(input: TokenStream) -> TokenStream {
+    let ComposeParamsInput { attrs, vis, name, ty_param, fields } =
+        parse_macro_input!(input as ComposeParamsInput);
+    let t = &ty_param;
+    let dim: usize = fields.iter().map(|(_, _, n)| n).sum();
+    let dim_lit = Literal::usize_unsuffixed(dim);
+
+    let field_names: Vec<_> = fields.iter().map(|(f, _, _)| f).collect();
+    let field_types: Vec<_> = fields.iter().map(|(_, ty, _)| ty).collect();
+    let field_dims: Vec<_> = fields
+        .iter()
+        .map(|(_, _, n)| Literal::usize_unsuffixed(*n))
+        .collect();
+
+    // Per-field offsets, computed here so the emitted code is all literals.
+    let mut offset = 0usize;
+    let field_offsets: Vec<_> = fields
+        .iter()
+        .map(|(_, _, n)| {
+            let lit = Literal::usize_unsuffixed(offset);
+            offset += n;
+            lit
+        })
+        .collect();
+
+    // Associated block-ref helper per field. Fields and associated functions
+    // live in different namespaces, so the fn can reuse the field's name.
+    let block_fns = fields.iter().zip(&field_offsets).map(|((f, _, n), off)| {
+        let n_lit = Literal::usize_unsuffixed(*n);
+        let doc = format!(
+            "Sub-block view of `{f}` ({n} dims at offset {off}) within a \
+             problem-builder block of this struct."
+        );
+        quote! {
+            #[doc = #doc]
+            #[allow(dead_code)]
+            pub fn #f(
+                key: ::odysseus_solver::problem::BlockKey<#dim_lit>,
+            ) -> ::odysseus_solver::problem::BlockRef<#n_lit> {
+                key.sub::<#n_lit>(#off)
+            }
+        }
+    });
+
+    let from_chunks = field_names.iter().zip(&field_types).zip(&field_dims).zip(&field_offsets).map(
+        |(((f, ty), n), off)| {
+            quote! {
+                let #f = {
+                    let chunk: [#t; #n] = ::std::array::from_fn(|i| arr[#off + i]);
+                    <#ty>::from(chunk)
+                };
+            }
+        },
+    );
+    let into_chunks = field_names.iter().zip(&field_types).zip(&field_dims).zip(&field_offsets).map(
+        |(((f, _ty), n), off)| {
+            quote! {
+                let chunk: [#t; #n] = <[#t; #n]>::from(val.#f);
+                out[#off..#off + #n].copy_from_slice(&chunk);
+            }
+        },
+    );
+
+    let _ = format_ident!("_unused"); // keep format_ident import warm for future use
+
+    quote! {
+        #(#attrs)*
+        #vis struct #name<#t> {
+            #(pub #field_names: #field_types,)*
+        }
+
+        impl<#t> #name<#t> {
+            /// Total parameter count across all fields.
+            pub const DIM: usize = #dim_lit;
+
+            #(#block_fns)*
+        }
+
+        impl<#t: Copy + Default> ::std::convert::From<[#t; #dim_lit]> for #name<#t> {
+            fn from(arr: [#t; #dim_lit]) -> Self {
+                #(#from_chunks)*
+                Self { #(#field_names,)* }
+            }
+        }
+
+        impl<#t: Copy + Default> ::std::convert::From<#name<#t>> for [#t; #dim_lit] {
+            fn from(val: #name<#t>) -> Self {
+                let mut out = [#t::default(); #dim_lit];
+                #(#into_chunks)*
+                out
+            }
+        }
+    }
+    .into()
+}

@@ -329,14 +329,24 @@ where
     // Copy existing entries, modifying diagonal
     let indptr_storage = jtj.indptr();
     let indptr: &[usize] = indptr_storage.as_slice().unwrap();
+    let mut diag_present = vec![false; n];
     for col in 0..n {
         for idx in indptr[col]..indptr[col + 1] {
             let row = jtj.indices()[idx];
             let mut val = jtj.data()[idx];
             if row == col {
                 val = val + lambda * T::max(val, T::one());
+                diag_present[col] = true;
             }
             tri.add_triplet(row, col, val);
+        }
+    }
+    // Parameters untouched by any residual have no structural diagonal;
+    // insert pure damping there so LDL stays nonsingular (matching the dense
+    // solver, where such parameters simply don't move).
+    for col in 0..n {
+        if !diag_present[col] {
+            tri.add_triplet(col, col, lambda * T::one());
         }
     }
 

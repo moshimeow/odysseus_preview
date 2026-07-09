@@ -4,11 +4,11 @@
 //! This library implements bundle adjustment for visual SLAM using const generics
 //! and forward-mode automatic differentiation from odysseus-solver.
 
-pub mod calibration;
-pub mod camera;
+pub use odysseus_camera::calibration;
+pub use odysseus_camera as camera;
 pub mod frame_graph;
 pub mod geometry;
-pub mod imu;
+pub use odysseus_imu as imu;
 pub mod math;
 pub mod optimization;
 pub mod simulation;

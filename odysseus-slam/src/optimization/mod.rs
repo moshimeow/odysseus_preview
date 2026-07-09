@@ -11,7 +11,6 @@ use odysseus_solver::math3d::Vec3;
 use odysseus_solver::{Jet, Real};
 use std::collections::{HashMap, HashSet};
 
-pub mod calibration;
 pub mod graph_visualization;
 pub mod marginalization;
 pub mod slam;
@@ -162,18 +161,7 @@ pub fn stereo_reprojection_residual_host_relative<T: Real>(
     )
 }
 
-/// Apply Huber loss to a single residual and its Jacobian row
-#[inline]
-pub fn apply_huber_loss(huber_delta: f64, residual: &mut f64, jacobian_row: &mut [f64]) {
-    let abs_r = residual.abs();
-    if abs_r > huber_delta {
-        let weight = (huber_delta / abs_r).sqrt();
-        *residual *= weight;
-        for j in jacobian_row.iter_mut() {
-            *j *= weight;
-        }
-    }
-}
+pub use odysseus_solver::apply_huber_loss;
 
 /// Get a point's XYZ position - either from params (if optimized) or from world (if fixed)
 pub(crate) fn get_point_xyz(
