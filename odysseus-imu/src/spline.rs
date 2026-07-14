@@ -1,8 +1,8 @@
-use crate::math::{SE3, SO3};
+use odysseus_solver::math3d::{SE3, SO3};
 use nalgebra as na;
 use odysseus_solver::math3d::{Quat, Vec3};
 pub type Vector3<T> = Vec3<T>;
-pub use crate::trajectory::ContinuousTrajectory;
+pub use crate::ContinuousTrajectory;
 use std::fs::File;
 use std::io::{Read, Result};
 

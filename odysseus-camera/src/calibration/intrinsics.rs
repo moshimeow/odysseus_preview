@@ -312,7 +312,7 @@ mod tests {
     use super::*;
     use crate::calibration::{AprilGridLayout, BoardObservation, CornerObservation};
     use approx::assert_abs_diff_eq;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     /// Project the layout's corners through `camera` from each pose, returning
@@ -373,14 +373,14 @@ mod tests {
         let centre = Vec3::new(board_w * 0.5, board_h * 0.5, 0.0);
 
         for _ in 0..20 {
-            let depth: f64 = rng.gen_range(0.5..1.2);
-            let dx: f64 = rng.gen_range(-0.05..0.05);
-            let dy: f64 = rng.gen_range(-0.05..0.05);
+            let depth: f64 = rng.random_range(0.5..1.2);
+            let dx: f64 = rng.random_range(-0.05..0.05);
+            let dy: f64 = rng.random_range(-0.05..0.05);
             let cam_pos = Vec3::new(centre.x + dx, centre.y + dy, -depth);
             let perturb_axis = Vec3::new(
-                rng.gen_range(-0.3..0.3),
-                rng.gen_range(-0.3..0.3),
-                rng.gen_range(-0.2..0.2),
+                rng.random_range(-0.3..0.3),
+                rng.random_range(-0.3..0.3),
+                rng.random_range(-0.2..0.2),
             );
             let rotation = SO3::exp(perturb_axis);
             poses.push(SE3::from_rotation_translation(rotation, cam_pos));

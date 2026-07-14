@@ -278,6 +278,7 @@ macro_rules! impl_add_factor {
 impl_add_factor!(add_factor1, add_factor1_sqrt_info, b1: D1);
 impl_add_factor!(add_factor2, add_factor2_sqrt_info, b1: D1, b2: D2);
 impl_add_factor!(add_factor3, add_factor3_sqrt_info, b1: D1, b2: D2, b3: D3);
+impl_add_factor!(add_factor4, add_factor4_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4);
 
 // ── Stock factor helpers ─────────────────────────────────────────────────────
 

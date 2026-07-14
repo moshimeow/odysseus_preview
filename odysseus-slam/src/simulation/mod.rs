@@ -3,7 +3,7 @@
 use crate::camera::{PinholeCamera, StereoCamera};
 use crate::geometry::{StereoObservation, Point3D};
 use crate::math::SE3;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use odysseus_solver::math3d::Vec3;
 
@@ -30,9 +30,9 @@ pub fn generate_random_points(
     (0..n_points)
         .map(|_| {
             Vec3::new(
-                rng.gen_range(min_x..max_x),
-                rng.gen_range(min_y..max_y),
-                rng.gen_range(min_z..max_z),
+                rng.random_range(min_x..max_x),
+                rng.random_range(min_y..max_y),
+                rng.random_range(min_z..max_z),
             )
         })
         .collect()
@@ -126,10 +126,10 @@ pub fn add_noise_to_stereo_observations(
     observations
         .iter()
         .map(|obs| {
-            let noise_left_u = rng.gen_range(-sigma..sigma);
-            let noise_left_v = rng.gen_range(-sigma..sigma);
-            let noise_right_u = rng.gen_range(-sigma..sigma);
-            let noise_right_v = rng.gen_range(-sigma..sigma);
+            let noise_left_u = rng.random_range(-sigma..sigma);
+            let noise_left_v = rng.random_range(-sigma..sigma);
+            let noise_right_u = rng.random_range(-sigma..sigma);
+            let noise_right_v = rng.random_range(-sigma..sigma);
 
             StereoObservation::new(
                 obs.point_id,

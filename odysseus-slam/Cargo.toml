@@ -12,9 +12,9 @@ odysseus-camera = { path = "../odysseus-camera" }
 odysseus-imu = { path = "../odysseus-imu" }
 num-traits = "0.2"
 nalgebra = "0.32"
-rand = "0.8"
-rand_chacha = "0.3"
-rand_distr = "0.4"
+rand = "0.10"
+rand_chacha = "0.10"
+rand_distr = "0.6"
 rerun = "0.32"
 clap = { version = "4.5", features = ["derive"] }
 sprs = "0.11.4"

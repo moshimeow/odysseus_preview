@@ -2,7 +2,7 @@
 
 use crate::math::SE3;
 use odysseus_solver::Real;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Trait for generating discrete camera poses
@@ -113,13 +113,13 @@ impl TrajectoryGenerator for BrownianTrajectory {
             let prev_tangent: [f64; 6] = prev_pose.log().into();
 
             // Add random step to each component
-            let delta_omega_x = rng.gen_range(-self.orientation_step..self.orientation_step);
-            let delta_omega_y = rng.gen_range(-self.orientation_step..self.orientation_step);
-            let delta_omega_z = rng.gen_range(-self.orientation_step..self.orientation_step);
+            let delta_omega_x = rng.random_range(-self.orientation_step..self.orientation_step);
+            let delta_omega_y = rng.random_range(-self.orientation_step..self.orientation_step);
+            let delta_omega_z = rng.random_range(-self.orientation_step..self.orientation_step);
 
-            let delta_x = rng.gen_range(-self.position_step..self.position_step);
-            let delta_y = rng.gen_range(-self.position_step..self.position_step);
-            let delta_z = rng.gen_range(-self.position_step..self.position_step);
+            let delta_x = rng.random_range(-self.position_step..self.position_step);
+            let delta_y = rng.random_range(-self.position_step..self.position_step);
+            let delta_z = rng.random_range(-self.position_step..self.position_step);
 
             let new_tangent = [
                 prev_tangent[0] + delta_omega_x,

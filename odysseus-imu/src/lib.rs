@@ -12,6 +12,7 @@
 pub mod types;
 pub mod preintegration;
 pub mod simulator;
+pub mod spline;
 pub mod residuals;
 pub mod optimization;
 

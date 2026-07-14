@@ -14,7 +14,7 @@ pub mod optimization;
 pub mod simulation;
 pub mod slam_system;
 pub mod slam_system_dynamic;
-pub mod spline;
+pub use odysseus_imu::spline;
 pub mod trajectory;
 pub mod utils;
 pub mod vio_slam_system;

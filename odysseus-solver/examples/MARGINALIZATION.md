@@ -1,3 +1,8 @@
+> **Note (2026-07-14):** the example programs this document walked through
+> were removed once marginalization became a library feature — see
+> `odysseus_solver::problem::PreparedProblem::marginalize` and its
+> `marginalization_matches_batch` test. The math below still applies.
+
 # Marginalization in Sliding Window Optimization
 
 ## Overview
