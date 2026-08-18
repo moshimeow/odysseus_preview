@@ -94,6 +94,11 @@ impl<T: Real> Vec3<T> {
         self.length()
     }
 
+    /// Normalize to unit length
+    pub fn normalize(self) -> Self {
+        self / self.length()
+    }
+
     /// Cross product
     pub fn cross(self, other: Self) -> Self {
         Self {
