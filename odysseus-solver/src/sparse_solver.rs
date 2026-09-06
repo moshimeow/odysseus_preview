@@ -41,7 +41,12 @@ where
 pub struct SparseLevenbergMarquardt<T> {
     // Solver parameters
     pub tolerance: T,
+    /// Stop on an accepted residual-norm improvement below this relative scale.
+    /// Zero disables this criterion.
+    pub function_tolerance: T,
     pub max_iterations: usize,
+    /// Optional per-coordinate absolute step limits.
+    pub step_limits: Option<DVector<T>>,
     pub initial_lambda: T,
     pub lambda_scale_up: T,
     pub lambda_scale_down: T,
@@ -90,7 +95,9 @@ where
 
         Self {
             tolerance: T::from(1e-10).unwrap(),
+            function_tolerance: T::zero(),
             max_iterations: 50,
+            step_limits: None,
             initial_lambda: T::from(1e-4).unwrap(),
             lambda_scale_up: T::from(10.0).unwrap(),
             lambda_scale_down: T::from(0.1).unwrap(),
@@ -105,6 +112,18 @@ where
 
     pub fn with_tolerance(mut self, tolerance: T) -> Self {
         self.tolerance = tolerance;
+        self
+    }
+
+    pub fn with_function_tolerance(mut self, tolerance: T) -> Self {
+        self.function_tolerance = tolerance;
+        self
+    }
+
+    pub fn with_step_limits(mut self, limits: DVector<T>) -> Self {
+        assert_eq!(limits.len(), self.jacobian.cols());
+        assert!(limits.iter().all(|&v| v > T::zero()));
+        self.step_limits = Some(limits);
         self
     }
 
@@ -185,9 +204,24 @@ where
             let error = self.residuals.norm();
 
             // Compute J^T * J using sprs
-            // Clone jacobian since transpose_into consumes self
-            let jt: CsMat<T> = self.jacobian.clone().transpose_into();
-            let jtj: CsMat<T> = &jt * &self.jacobian;
+            // Inactive hinges and frozen dependencies can leave many exact
+            // zeros inside the fixed pattern. Omit them from this iteration's
+            // product, while retaining the complete pattern for cost_fn.
+            let mut indptr = vec![0];
+            let mut indices = Vec::new();
+            let mut values = Vec::new();
+            for row in self.jacobian.outer_iterator() {
+                for (col, &value) in row.iter() {
+                    if value != T::zero() {
+                        indices.push(col);
+                        values.push(value);
+                    }
+                }
+                indptr.push(values.len());
+            }
+            let active = CsMat::new(self.jacobian.shape(), indptr, indices, values);
+            let jt: CsMat<T> = active.transpose_view().to_owned();
+            let jtj: CsMat<T> = &jt * &active;
 
             // Compute J^T * r
             // jt is CSC, so outer_iterator iterates over columns of J^T
@@ -231,7 +265,16 @@ where
             // Solve the system
             let jtr_vec: Vec<T> = self.jtr.iter().cloned().collect();
             let step_vec: Vec<T> = ldl.solve(&jtr_vec);
-            let step = DVector::from_vec(step_vec);
+            let mut step = DVector::from_vec(step_vec);
+            let mut clipped = false;
+            if let Some(limits) = &self.step_limits {
+                for (value, &limit) in step.iter_mut().zip(limits.iter()) {
+                    if num_traits::Float::abs(*value) > limit {
+                        *value = num_traits::Float::signum(*value) * limit;
+                        clipped = true;
+                    }
+                }
+            }
 
             // Try the step
             let new_params = &params - &step;
@@ -246,12 +289,19 @@ where
             let new_error = self.temp_residuals.norm();
 
             let step_norm = step.norm();
-            let converged = step_norm < self.tolerance;
+            let converged = step_norm < self.tolerance
+                || (new_error < error
+                    && error - new_error < self.function_tolerance * (T::one() + error));
 
             // Accept or reject step
             if new_error < error {
                 params = new_params;
-                lambda = lambda * self.lambda_scale_down;
+                if !clipped {
+                    // Keep damping recoverable after a long run of accepted
+                    // steps; otherwise rejections can consume the iteration
+                    // budget just climbing back from an almost-zero lambda.
+                    lambda = num_traits::Float::max(lambda * self.lambda_scale_down, T::epsilon());
+                }
 
                 on_accept(&params);
 
@@ -460,6 +510,38 @@ mod tests {
         // Should find a ≈ 2, b ≈ 1
         assert!((result[0] - 2.0).abs() < 1e-6);
         assert!((result[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_limits_bound_updates_without_stalling_damping() {
+        let mut solver = SparseLevenbergMarquardt::<f64>::new(2, 2, &[(0, 0), (1, 1)])
+            .with_step_limits(DVector::from_vec(vec![0.25, 0.25]));
+        let mut previous = 0.0;
+        let result = solver.solve(DVector::from_vec(vec![0.0, 0.0]), |x, r, j| {
+            r[0] = x[0] - 5.0;
+            r[1] = x[1] - 3.0;
+            j.fill(1.0);
+        }, |_, _, x| {
+            assert!((x[0] - previous).abs() <= 0.25 + 1e-12);
+            previous = x[0];
+        });
+        assert!((result[0] - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inactive_hinge_can_become_active_during_solve() {
+        // The keepout row starts at zero. Crossing its boundary must activate
+        // its Jacobian even after zero entries were omitted from a product.
+        let mut solver = SparseLevenbergMarquardt::<f64>::new(3, 2, &[(0, 0), (1, 0), (2, 1)]);
+        let result = solver.solve(DVector::from_vec(vec![-1.0, 0.0]), |x, r, j| {
+            r[0] = x[0] - 2.0;
+            j[0] = 1.0;
+            r[1] = 10.0 * x[0].max(0.0);
+            j[1] = if x[0] > 0.0 { 10.0 } else { 0.0 };
+            r[2] = x[1];
+            j[2] = 1.0;
+        }, |_, _, _| {});
+        assert!((result[0] - 2.0 / 101.0).abs() < 1e-6);
     }
 
     #[test]

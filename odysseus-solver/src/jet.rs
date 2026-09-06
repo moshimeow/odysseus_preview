@@ -107,6 +107,7 @@ macro_rules! impl_jet_arithmetic {
         impl<const N: usize> Add for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn add(self, rhs: Self) -> Self {
                 let result = Self {
                     value: self.value + rhs.value,
@@ -121,6 +122,7 @@ macro_rules! impl_jet_arithmetic {
         impl<const N: usize> Sub for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn sub(self, rhs: Self) -> Self {
                 let result = Self {
                     value: self.value - rhs.value,
@@ -135,6 +137,7 @@ macro_rules! impl_jet_arithmetic {
         impl<const N: usize> Mul for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn mul(self, rhs: Self) -> Self {
                 let result = Self {
                     value: self.value * rhs.value,
@@ -151,6 +154,7 @@ macro_rules! impl_jet_arithmetic {
         impl<const N: usize> Div for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn div(self, rhs: Self) -> Self {
                 let b_squared = rhs.value * rhs.value;
                 let result = Self {
@@ -168,6 +172,7 @@ macro_rules! impl_jet_arithmetic {
         impl<const N: usize> Neg for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn neg(self) -> Self {
                 let result = Self {
                     value: -self.value,
@@ -193,6 +198,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Add<$T> for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn add(self, rhs: $T) -> Self {
                 let result = Self {
                     value: self.value + rhs,
@@ -207,6 +213,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Add<Jet<$T, N>> for $T {
             type Output = Jet<$T, N>;
 
+            #[inline]
             fn add(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
                 let result = Jet {
                     value: self + rhs.value,
@@ -221,6 +228,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Sub<$T> for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn sub(self, rhs: $T) -> Self {
                 let result = Self {
                     value: self.value - rhs,
@@ -235,6 +243,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Sub<Jet<$T, N>> for $T {
             type Output = Jet<$T, N>;
 
+            #[inline]
             fn sub(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
                 let result = Jet {
                     value: self - rhs.value,
@@ -249,6 +258,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Mul<Jet<$T, N>> for $T {
             type Output = Jet<$T, N>;
 
+            #[inline]
             fn mul(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
                 let result = Jet {
                     value: self * rhs.value,
@@ -263,6 +273,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Mul<$T> for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn mul(self, rhs: $T) -> Self {
                 let result = Self {
                     value: self.value * rhs,
@@ -277,6 +288,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Div<$T> for Jet<$T, N> {
             type Output = Self;
 
+            #[inline]
             fn div(self, rhs: $T) -> Self {
                 let result = Self {
                     value: self.value / rhs,
@@ -291,6 +303,7 @@ macro_rules! impl_jet_scalar_arithmetic {
         impl<const N: usize> Div<Jet<$T, N>> for $T {
             type Output = Jet<$T, N>;
 
+            #[inline]
             fn div(self, rhs: Jet<$T, N>) -> Jet<$T, N> {
                 let b_squared = rhs.value * rhs.value;
                 let result = Jet {
