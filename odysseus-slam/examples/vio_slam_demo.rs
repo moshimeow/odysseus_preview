@@ -134,7 +134,7 @@ fn run_vio(noise_stddev: f64) -> Result<(), Box<dyn std::error::Error>> {
         IMU_RATE,
     );
 
-    let imu_measurements = simulator.generate_from_continuous_trajectory(&trajectory, duration, 42);
+    let imu_measurements = simulator.generate_from_continuous_trajectory(&trajectory, 42);
     println!("   Generated {} IMU measurements.", imu_measurements.len());
 
     // Sample ground truth camera poses from spline trajectory

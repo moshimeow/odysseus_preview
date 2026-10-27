@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate IMU measurements using analytical derivatives
     let imu_measurements =
-        simulator.generate_from_continuous_trajectory(&trajectory, args.duration, seed);
+        simulator.generate_from_continuous_trajectory(&trajectory, seed);
     println!(
         "Generated {} IMU measurements (using analytical Δv/Δt)",
         imu_measurements.len()

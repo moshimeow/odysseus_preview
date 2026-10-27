@@ -32,10 +32,25 @@ use odysseus_solver::math3d::SE3;
 /// Trait for continuous trajectories with analytical derivatives
 ///
 /// Provides exact position, orientation, and velocity at any time t.
-/// Time is normalized: t ∈ [0, 1] maps to the full trajectory duration.
+/// Time is normalized: t ∈ [0, 1] maps to the full trajectory duration,
+/// which the trajectory reports itself ([`Self::duration`]); the `_at`
+/// methods take seconds into the trajectory instead.
 pub trait ContinuousTrajectory {
+    /// Total duration in seconds: the span normalized t ∈ [0, 1] covers.
+    fn duration(&self) -> f64;
+
     /// Get pose at normalized time t ∈ [0, 1]
     fn pose(&self, t: f64) -> SE3<f64>;
+
+    /// Pose `time_s` seconds into the trajectory.
+    fn pose_at(&self, time_s: f64) -> SE3<f64> {
+        self.pose(time_s / self.duration())
+    }
+
+    /// Linear velocity in world frame `time_s` seconds into the trajectory.
+    fn linear_velocity_at(&self, time_s: f64) -> Vector3<f64> {
+        self.linear_velocity(time_s / self.duration())
+    }
 
     /// Get linear velocity in world frame at normalized time t
     fn linear_velocity(&self, t: f64) -> Vector3<f64>;
@@ -173,6 +188,10 @@ impl ContinuousCircularTrajectory {
 }
 
 impl ContinuousTrajectory for ContinuousCircularTrajectory {
+    fn duration(&self) -> f64 {
+        self.duration
+    }
+
     fn pose(&self, t: f64) -> SE3<f64> {
         self.pose_generic(t)
     }

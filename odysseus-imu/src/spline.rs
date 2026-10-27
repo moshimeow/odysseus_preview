@@ -227,6 +227,10 @@ impl BezierSplineTrajectory {
 }
 
 impl ContinuousTrajectory for BezierSplineTrajectory {
+    fn duration(&self) -> f64 {
+        self.duration
+    }
+
     fn pose(&self, t: f64) -> SE3<f64> {
         let t_abs = t * self.duration;
         let p_cv = Vec3::new(

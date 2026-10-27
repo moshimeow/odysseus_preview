@@ -547,7 +547,7 @@ mod tests {
         let noise_params = ImuNoiseParams::zero();
         let simulator = ImuSimulator::new(noise_params.clone(), 200.0);
         let measurements =
-            simulator.generate_from_continuous_trajectory(&trajectory, duration, 123);
+            simulator.generate_from_continuous_trajectory(&trajectory, 123);
 
         // Build host quaternions and initial states from ground truth
         let mut host_quats = Vec::new();

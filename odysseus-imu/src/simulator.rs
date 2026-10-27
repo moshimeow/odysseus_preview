@@ -112,13 +112,12 @@ impl ImuSimulator {
     }
 
     /// wrapper for generate_from_continuous_trajectory_with_bias that returns only the measurements
-    pub fn generate_from_continuous_trajectory<T: ContinuousTrajectory>(
+    pub fn generate_from_continuous_trajectory<T: ContinuousTrajectory + ?Sized>(
         &self,
         trajectory: &T,
-        duration: f64,
         seed: u64,
     ) -> Vec<ImuMeasurement>{
-        let (measurements, _, _) = self.generate_from_continuous_trajectory_with_bias(trajectory, duration, seed);
+        let (measurements, _, _) = self.generate_from_continuous_trajectory_with_bias(trajectory, seed);
         measurements
     }
 
@@ -129,17 +128,18 @@ impl ImuSimulator {
     /// This avoids the systematic errors from finite-differencing discrete poses.
     ///
     /// # Arguments
-    /// * `trajectory` - Continuous trajectory with analytical derivatives
+    /// * `trajectory` - Continuous trajectory with analytical derivatives,
+    ///   sampled over its own [`ContinuousTrajectory::duration`]
     /// * `seed` - Random seed for noise generation
     ///
     /// # Returns
     /// Vector of IMU measurements at the configured rate
-    pub fn generate_from_continuous_trajectory_with_bias<T: ContinuousTrajectory>(
+    pub fn generate_from_continuous_trajectory_with_bias<T: ContinuousTrajectory + ?Sized>(
         &self,
         trajectory: &T,
-        duration: f64,
         seed: u64,
     ) -> (Vec<ImuMeasurement>, Vector3<f64>, Vector3<f64>) {
+        let duration = trajectory.duration();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut measurements = Vec::new();
 
@@ -350,6 +350,9 @@ mod tests {
         struct StationaryTrajectory;
 
         impl ContinuousTrajectory for StationaryTrajectory {
+            fn duration(&self) -> f64 {
+                1.0
+            }
             fn pose(&self, _t: f64) -> SE3<f64> {
                 SE3::identity()
             }
@@ -362,7 +365,7 @@ mod tests {
         }
 
         let sim = ImuSimulator::ideal(100.0);
-        let measurements = sim.generate_from_continuous_trajectory(&StationaryTrajectory, 1.0, 42);
+        let measurements = sim.generate_from_continuous_trajectory(&StationaryTrajectory, 42);
 
         assert!(!measurements.is_empty());
 
@@ -391,7 +394,7 @@ mod tests {
         let traj = ContinuousCircularTrajectory::fixed_orientation(radius, duration);
 
         let sim = ImuSimulator::ideal(200.0);
-        let measurements = sim.generate_from_continuous_trajectory(&traj, duration, 42);
+        let measurements = sim.generate_from_continuous_trajectory(&traj, 42);
 
         assert!(!measurements.is_empty());
         assert!(measurements.len() > 1000); // 10s at 200Hz
@@ -428,6 +431,9 @@ mod tests {
         }
 
         impl ContinuousTrajectory for ConstantVelocityTrajectory {
+            fn duration(&self) -> f64 {
+                self.duration
+            }
             fn pose(&self, t: f64) -> SE3<f64> {
                 let pos = self.velocity * t * self.duration;
                 SE3::from_rotation_translation(
@@ -449,7 +455,7 @@ mod tests {
         };
 
         let sim = ImuSimulator::ideal(100.0);
-        let measurements = sim.generate_from_continuous_trajectory(&traj, 5.0, 42);
+        let measurements = sim.generate_from_continuous_trajectory(&traj, 42);
 
         // With constant velocity: dv/dt = 0, so accel = -gravity in body frame.
         // Gravity = [0, 9.81, 0] in Y-down world, identity orientation → accel = [0, -9.81, 0].
@@ -466,10 +472,24 @@ mod tests {
     }
 
     #[test]
+    fn test_samples_span_the_trajectory_own_duration() {
+        // The simulator takes the duration from the trajectory, so a 5 s
+        // trajectory yields about 5 s of samples at the IMU rate.
+        let rate = 200.0;
+        let traj = ContinuousCircularTrajectory::new(1.0, 5.0);
+        let measurements = ImuSimulator::ideal(rate).generate_from_continuous_trajectory(&traj, 42);
+        let last = measurements.last().expect("samples").timestamp;
+        assert!((last - traj.duration).abs() <= 2.0 / rate, "last sample at {last} s");
+        // Seconds and normalized time agree.
+        let p = traj.pose_at(1.25).translation - traj.pose(0.25).translation;
+        assert!(p.norm() < 1e-12);
+    }
+
+    #[test]
     fn test_continuous_trajectory_timestamps_monotonic() {
         let traj = ContinuousCircularTrajectory::new(1.0, 5.0);
         let sim = ImuSimulator::ideal(200.0);
-        let measurements = sim.generate_from_continuous_trajectory(&traj, 5.0, 42);
+        let measurements = sim.generate_from_continuous_trajectory(&traj, 42);
 
         for i in 1..measurements.len() {
             assert!(
