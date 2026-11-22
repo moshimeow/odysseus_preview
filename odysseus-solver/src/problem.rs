@@ -30,6 +30,8 @@ use crate::sparse_solver::{IterationResult, SparseLevenbergMarquardt};
 use crate::Jet;
 use nalgebra::DVector;
 
+mod schur;
+
 
 // ── Blocks ───────────────────────────────────────────────────────────────────
 
