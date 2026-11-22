@@ -366,7 +366,15 @@ impl PreparedProblem {
         'outer: for iteration in 0..opts.max_iterations {
             iterations = iteration + 1;
             let started = Instant::now();
+            // Seconds in: band factor, reduction Y, Schur product, dense solve, trial evaluation.
+            let mut spent = [0.0f64; 5];
+            let mut lap = Instant::now();
+            let mut mark = |slot: usize, lap: &mut Instant| {
+                spent[slot] += lap.elapsed().as_secs_f64();
+                *lap = Instant::now();
+            };
             let accepted = loop {
+                lap = Instant::now();
                 // Damp as the sparse solver does: diagonal += lambda * max(diagonal, 1).
                 let mut factor = Band { n: chain.n, width: chain.width, data: chain.data.clone() };
                 for i in 0..n_chain {
@@ -374,7 +382,9 @@ impl PreparedProblem {
                     factor.data[at] += lambda * factor.data[at].max(1.0);
                 }
                 let mut step = None;
-                if factor.factorize() {
+                let factored = factor.factorize();
+                mark(0, &mut lap);
+                if factored {
                     // Y = L⁻¹ B, a column at a time across threads.
                     reduced_coupling.copy_from(&coupling);
                     if n_chain > 0 && n_rest > 0 {
@@ -390,21 +400,25 @@ impl PreparedProblem {
                             }
                         });
                     }
+                    mark(1, &mut lap);
                     // S = C + damping − YᵀY, in column strips across threads.
                     let mut schur = rest.clone();
                     for i in 0..n_rest {
                         schur[(i, i)] += lambda * schur[(i, i)].max(1.0);
                     }
                     if n_chain > 0 && n_rest > 0 {
+                        // Yᵀ is written out so that each strip is a plain matrix product, which
+                        // nalgebra hands to a cache-blocked kernel (its `tr_mul` is not blocked).
+                        let transposed = reduced_coupling.transpose();
                         let strip = n_rest.div_ceil(workers).max(1);
                         let products: Vec<(usize, DMatrix<f64>)> = std::thread::scope(|scope| {
                             let handles: Vec<_> = (0..n_rest)
                                 .step_by(strip)
                                 .map(|first| {
-                                    let y = &reduced_coupling;
+                                    let (y, yt) = (&reduced_coupling, &transposed);
                                     scope.spawn(move || {
                                         let count = strip.min(n_rest - first);
-                                        (first, y.tr_mul(&y.columns(first, count)))
+                                        (first, yt * y.columns(first, count))
                                     })
                                 })
                                 .collect();
@@ -415,6 +429,7 @@ impl PreparedProblem {
                             target -= product;
                         }
                     }
+                    mark(2, &mut lap);
                     let mut reduced_chain = gradient_chain.clone();
                     factor.forward(&mut reduced_chain);
                     let reduced_chain = DVector::from_vec(reduced_chain);
@@ -429,6 +444,7 @@ impl PreparedProblem {
                         step = Some((step_chain, step_rest));
                     }
                 }
+                mark(3, &mut lap);
                 if let Some((step_chain, step_rest)) = step {
                     let mut trial = x.clone();
                     for (column, slot) in slots.iter().enumerate() {
@@ -438,6 +454,7 @@ impl PreparedProblem {
                         };
                     }
                     let trial_cost = evaluate(self, &trial, None);
+                    mark(4, &mut lap);
                     if trial_cost.is_finite() && trial_cost < cost {
                         break Some((trial, trial_cost));
                     }
@@ -456,6 +473,7 @@ impl PreparedProblem {
             let gain = (cost - trial_cost) / cost.max(f64::MIN_POSITIVE);
             x = trial;
             lambda = (lambda * 0.1).max(f64::EPSILON);
+            let relinearize = Instant::now();
             cost = evaluate(
                 self,
                 &x,
@@ -463,11 +481,18 @@ impl PreparedProblem {
             );
             if opts.verbose {
                 println!(
-                    "schur iteration {iteration}: error {:.6} (down {:.2e}), lambda {:.1e}, {:.2} s",
+                    "schur iteration {iteration}: error {:.6} (down {:.2e}), lambda {:.1e}, {:.2} s \
+                     (band {:.2}, reduce {:.2}, product {:.2}, dense {:.2}, trial {:.2}, linearize {:.2})",
                     cost.sqrt(),
                     gain,
                     lambda,
-                    started.elapsed().as_secs_f64()
+                    started.elapsed().as_secs_f64(),
+                    spent[0],
+                    spent[1],
+                    spent[2],
+                    spent[3],
+                    spent[4],
+                    relinearize.elapsed().as_secs_f64()
                 );
             }
             if gain < opts.tolerance {
