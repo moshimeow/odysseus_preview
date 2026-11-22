@@ -8,11 +8,15 @@
 //! - `ImuFrameState`: Velocity and bias state for a frame (separate from Pose)
 //! - `PreintegratedImu`: Preintegrated IMU measurements between keyframes
 //! - `ImuSimulator`: Synthetic IMU generation from trajectories
+//! - `CatmullRomSlerpTrajectory`, `PingPongTrajectory`: continuous trajectories through
+//!   sampled poses, and IMU synthesis from them (moved from controller-tracking 2026-11)
 
 pub mod types;
 pub mod preintegration;
 pub mod simulator;
 pub mod spline;
+pub mod catmull_rom_slerp_trajectory;
+pub mod ping_pong_trajectory;
 pub mod residuals;
 pub mod optimization;
 
