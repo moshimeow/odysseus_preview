@@ -8,7 +8,7 @@
 //! 2. Group factors into named kinds carrying weighting decorations
 //!    (`kind("visual").sigma(..).huber(..).key()`).
 //! 3. Add factors: a residual closure generic over the jet, plus the block
-//!    refs it touches (`add_factor1/2/3`). Rows, sparsity, and Jacobian
+//!    refs it touches (`add_factor1` … `add_factor8`). Rows, sparsity, and Jacobian
 //!    scatter are derived.
 //! 4. `prepare()` once — all layout computed, all storage allocated.
 //!    `solve()` iterations only overwrite values (no allocation).
@@ -202,7 +202,7 @@ impl Problem {
 
 }
 
-/// Generates `add_factor{1,2,3}` (+ `_sqrt_info` variants): the typed wrappers
+/// Generates `add_factorN` (+ `_sqrt_info` variants): the typed wrappers
 /// that build jet inputs at local indices, run the residual closure, and write
 /// the local Jacobian row-major.
 macro_rules! impl_add_factor {
@@ -279,6 +279,10 @@ impl_add_factor!(add_factor1, add_factor1_sqrt_info, b1: D1);
 impl_add_factor!(add_factor2, add_factor2_sqrt_info, b1: D1, b2: D2);
 impl_add_factor!(add_factor3, add_factor3_sqrt_info, b1: D1, b2: D2, b3: D3);
 impl_add_factor!(add_factor4, add_factor4_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4);
+impl_add_factor!(add_factor5, add_factor5_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4, b5: D5);
+impl_add_factor!(add_factor6, add_factor6_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4, b5: D5, b6: D6);
+impl_add_factor!(add_factor7, add_factor7_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4, b5: D5, b6: D6, b7: D7);
+impl_add_factor!(add_factor8, add_factor8_sqrt_info, b1: D1, b2: D2, b3: D3, b4: D4, b5: D5, b6: D6, b7: D7, b8: D8);
 
 // ── Stock factor helpers ─────────────────────────────────────────────────────
 

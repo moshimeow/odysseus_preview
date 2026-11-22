@@ -1326,6 +1326,7 @@ pub fn sqrt_info_from_cov<const N: usize>(
 
 // ── Lie groups (moved from odysseus-slam 2026-07; odysseus-slam re-exports) ──
 
+pub mod catmull_rom;
 mod se3;
 mod so3;
 pub mod stereographic;
