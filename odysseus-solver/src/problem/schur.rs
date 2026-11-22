@@ -368,13 +368,12 @@ impl PreparedProblem {
             let started = Instant::now();
             // Seconds in: band factor, reduction Y, Schur product, dense solve, trial evaluation.
             let mut spent = [0.0f64; 5];
-            let mut lap = Instant::now();
             let mut mark = |slot: usize, lap: &mut Instant| {
                 spent[slot] += lap.elapsed().as_secs_f64();
                 *lap = Instant::now();
             };
             let accepted = loop {
-                lap = Instant::now();
+                let mut lap = Instant::now();
                 // Damp as the sparse solver does: diagonal += lambda * max(diagonal, 1).
                 let mut factor = Band { n: chain.n, width: chain.width, data: chain.data.clone() };
                 for i in 0..n_chain {
